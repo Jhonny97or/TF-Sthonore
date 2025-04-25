@@ -9,7 +9,9 @@ warnings.filterwarnings('ignore', category=UserWarning)
 # Creamos la app WSGI que Vercel va a exponer
 app = Flask(__name__)
 
+# Atiende POST en “/” y en “/api/convert”
 @app.route('/', methods=['POST'])
+@app.route('/api/convert', methods=['POST'])
 def convert():
     try:
         # Validar upload
