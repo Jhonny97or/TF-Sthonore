@@ -1,10 +1,5 @@
 {
   "version": 2,
-  "functions": {
-    "api/convert.py": {
-      "runtime": "@vercel/[email protected]"
-    }
-  },
   "rewrites": [
     { "source": "/", "destination": "/index.html" }
   ]
