@@ -1,3 +1,8 @@
+import logging
+# Suprime los warnings de pdfminer sobre CropBox
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+logging.getLogger("pdfminer.pdfpage").setLevel(logging.ERROR)
+
 from flask import Flask, request, send_file
 from io import BytesIO
 import re, warnings, tempfile, traceback
@@ -124,3 +129,4 @@ def convert():
     except Exception:
         tb = traceback.format_exc()
         return f"❌ Error interno en la función:\n{tb}", 500
+
