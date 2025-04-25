@@ -1,5 +1,4 @@
 import logging
-# Suprime los warnings de pdfminer sobre CropBox
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 logging.getLogger("pdfminer.pdfpage").setLevel(logging.ERROR)
 
@@ -11,29 +10,23 @@ from openpyxl import Workbook
 
 warnings.filterwarnings('ignore', category=UserWarning)
 
-# Creamos la app WSGI que Vercel va a exponer
 app = Flask(__name__)
 
-# Atiende POST en “/” y en “/api/convert”
 @app.route('/', methods=['POST'])
 @app.route('/api/convert', methods=['POST'])
 def convert():
     try:
-        # Validar upload
         if 'file' not in request.files:
             return "No file uploaded", 400
         file = request.files['file']
         doc_type = request.form.get('type', 'auto')
 
-        # Guardar PDF en temporal
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         file.save(tmp.name)
         pdf_path = tmp.name
 
-        # Leer primera página
         first = extract_text(pdf_path, page_numbers=[0]).upper()
 
-        # Detectar tipo si es “auto”
         if doc_type == 'auto':
             if ('ACCUSE' in first and 'RECEPTION' in first) or 'ACKNOWLEDGE' in first:
                 doc_type = 'proforma'
@@ -47,7 +40,6 @@ def convert():
             return float(s.replace('.','').replace(',','.')) if s else 0.0
 
         records = []
-        # — FACTURA —
         if doc_type == 'factura':
             m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', first)
             base = m.group(1) if m else None
@@ -66,19 +58,13 @@ def convert():
                     ref, ean, custom, qty_s, unit_s, tot_s = mm.groups()
                     inv = base + 'PLV' if 'FACTURE SANS PAIEMENT' in up else base
                     records.append({
-                        'Reference': ref,
-                        'Code EAN': ean,
-                        'Custom Code': custom,
-                        'Description': '',
-                        'Origin': origin,
-                        'Quantity': int(qty_s),
-                        'Unit Price': num(unit_s),
-                        'Total Price': num(tot_s),
-                        'Invoice Number': inv
+                        'Reference': ref, 'Code EAN': ean, 'Custom Code': custom,
+                        'Description': '', 'Origin': origin,
+                        'Quantity': int(qty_s), 'Unit Price': num(unit_s),
+                        'Total Price': num(tot_s), 'Invoice Number': inv
                     })
             headers = ['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
 
-        # — PROFORMA —
         else:
             pat = re.compile(r'([A-Z]\d{5,7})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)')
             full = extract_text(pdf_path)
@@ -92,22 +78,22 @@ def convert():
                     qty = int(qty_s.replace('.','').replace(',',''))
                     unit = num(price_s)
                     records.append({
-                        'Reference': ref,
-                        'Code EAN': ean,
-                        'Description': desc,
-                        'Quantity': qty,
-                        'Unit Price': unit,
-                        'Total Price': unit*qty
+                        'Reference': ref, 'Code EAN': ean,
+                        'Description': desc, 'Quantity': qty,
+                        'Unit Price': unit, 'Total Price': unit*qty
                     })
                     i += 2
                 else:
                     i += 1
             headers = ['Reference','Code EAN','Description','Quantity','Unit Price','Total Price']
 
+        # ← Aquí sustituimos el fallo silencioso
         if not records:
-            return "Sin registros extraídos.", 400
+            full = extract_text(pdf_path)
+            lines = full.split('\n')
+            preview = '\n'.join(lines[:20])
+            return f"Sin registros extraídos.\n--- Preview primeras 20 líneas del PDF ---\n{preview}", 400
 
-        # Generar Excel en memoria
         wb = Workbook()
         ws = wb.active
         ws.append(headers)
@@ -117,16 +103,9 @@ def convert():
         buf = BytesIO()
         wb.save(buf)
         buf.seek(0)
-
-        # Devolver como descarga
-        return send_file(
-            buf,
-            as_attachment=True,
-            download_name='extracted_data.xlsx',
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
+        return send_file(buf, as_attachment=True, download_name='extracted_data.xlsx',
+                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
     except Exception:
         tb = traceback.format_exc()
         return f"❌ Error interno en la función:\n{tb}", 500
-
