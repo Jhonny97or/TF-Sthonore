@@ -27,7 +27,7 @@ def convert():
         file.save(tmp.name)
         pdf_path = tmp.name
 
-        # Extraer todo el texto de la primera página
+        # Extraer texto de la primera página
         text_first = extract_text(pdf_path, page_numbers=[0]) or ""
         first = text_first.upper()
 
@@ -40,7 +40,6 @@ def convert():
             else:
                 return "No pude determinar tipo", 400
 
-        # Función para parsear números
         def num(s):
             s = (s or '').strip()
             return float(s.replace('.','').replace(',','.')) if s else 0.0
@@ -49,17 +48,16 @@ def convert():
 
         # ================= FACTURA =================
         if doc_type == 'factura':
-            # 1) Intento robusto: buscar línea con “INVOICE WITHOUT PAYMENT” o “FACTURE SANS PAIEMENT”
+            # buscar número tras “INVOICE WITHOUT PAYMENT” o “FACTURE SANS PAIEMENT”
             lines0 = text_first.split('\n')
             base = None
             for i, ln in enumerate(lines0):
                 up = ln.upper()
                 if 'INVOICE WITHOUT PAYMENT' in up or 'FACTURE SANS PAIEMENT' in up:
-                    # el número suele estar en la siguiente línea
                     if i+1 < len(lines0) and re.match(r'^\d{6,}$', lines0[i+1].strip()):
                         base = lines0[i+1].strip()
                         break
-            # 2) Fallback a regex en primer bloque de texto
+            # fallback regex
             if not base:
                 m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', first)
                 base = m.group(1) if m else None
@@ -67,7 +65,6 @@ def convert():
             if not base:
                 return "No número de factura", 400
 
-            # Patrón de líneas de detalle
             pat = re.compile(r'^([A-Z]\d{5,7})\s+(\d{13})\s+(\d{6,8})\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)$')
             origin = ''
             full = extract_text(pdf_path) or ""
@@ -118,11 +115,15 @@ def convert():
                     i += 1
             headers = ['Reference','Code EAN','Description','Quantity','Unit Price','Total Price']
 
-        # Si no hay registros, devolver preview para debug
+        # Depuración: mostrar primeras 100 líneas si no extrajo nada
         if not records:
             full = extract_text(pdf_path) or ""
-            preview = "\n".join(full.split('\n')[:20])
-            return f"Sin registros extraídos.\n--- Preview primeras 20 líneas del PDF ---\n{preview}", 400
+            preview = "\n".join(full.split('\n')[:100])
+            return (
+                "Sin registros extraídos.\n"
+                "--- Preview primeras 100 líneas del PDF ---\n"
+                f"{preview}"
+            ), 400
 
         # Generar Excel en memoria
         wb = Workbook()
