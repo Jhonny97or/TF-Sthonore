@@ -1,0 +1,8 @@
+{
+  "functions": {
+    "api/convert.py": { "runtime": "python3.9" }
+  },
+  "rewrites": [
+    { "source": "/", "destination": "/index.html" }
+  ]
+}
