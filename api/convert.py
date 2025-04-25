@@ -1,93 +1,123 @@
 import re, warnings, tempfile, base64
-import pdfplumber, pandas as pd
+from pdfminer.high_level import extract_text
+from openpyxl import Workbook
+
 warnings.filterwarnings('ignore', category=UserWarning)
 
 def handler(request):
     if request.method != 'POST':
-        return {'statusCode':405,'body':'Only POST'}
-    # parse multipart
+        return {'statusCode': 405, 'body': 'Only POST allowed'}
+
+    # parse multipart form
     import cgi
-    form = cgi.FieldStorage(fp=request.environ['wsgi.input'], environ=request.environ)
+    form = cgi.FieldStorage(
+        fp=request.environ['wsgi.input'],
+        environ=request.environ,
+        keep_blank_values=True
+    )
     fileitem = form['file']
     if not fileitem.filename:
-        return {'statusCode':400,'body':'No file uploaded'}
+        return {'statusCode': 400, 'body': 'No file uploaded'}
     doc_type = form.getvalue('type') or 'auto'
 
-    # save upload to temp file
+    # save uploaded PDF to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
         tmp.write(fileitem.file.read())
-        path = tmp.name
+        pdf_path = tmp.name
 
-    # extraction logic (igual al tuyo, adaptado)
-    records = []
-    with pdfplumber.open(path) as pdf:
-        first = (pdf.pages[0].extract_text() or '').upper()
-        if doc_type == 'auto':
-            if ('ACCUSE' in first and 'RECEPTION' in first) or 'ACKNOWLEDGE' in first:
-                doc_type = 'proforma'
-            elif 'FACTURE' in first or 'INVOICE' in first:
-                doc_type = 'factura'
-            else:
-                return {'statusCode':400,'body':'No pude determinar tipo'}
-        def num(s): return float(s.replace('.','').replace(',','.')) if s else 0.0
+    # extract full text of first page
+    first = extract_text(pdf_path, page_numbers=[0]).upper()
 
-        if doc_type == 'factura':
-            m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', first)
-            base = m.group(1) if m else None
-            if not base: return {'statusCode':400,'body':'No número factura'}
-            pat = re.compile(r'^([A-Z]\d{5,7})\s+(\d{13})\s+(\d{6,8})\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)$')
-            origin = ''
-            for p in pdf.pages:
-                txt = p.extract_text() or ''
-                up = txt.upper()
-                inv = base + 'PLV' if 'FACTURE SANS PAIEMENT' in up else base
-                for ln in txt.split('\n'):
-                    if "PAYS D'ORIGINE" in ln:
-                        origin = ln.split(':',1)[-1].strip()
-                    mm = pat.match(ln.strip())
-                    if mm:
-                        r, e, c, q, u, t = mm.groups()
-                        records.append({
-                          'Reference':r,'Code EAN':e,'Custom Code':c,
-                          'Description':'','Origin':origin,
-                          'Quantity':int(q),'Unit Price':num(u),
-                          'Total Price':num(t),'Invoice Number':inv
-                        })
-            cols = ['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
+    # determine type
+    if doc_type == 'auto':
+        if ('ACCUSE' in first and 'RECEPTION' in first) or 'ACKNOWLEDGE' in first:
+            doc_type = 'proforma'
+        elif 'FACTURE' in first or 'INVOICE' in first:
+            doc_type = 'factura'
         else:
-            pat = re.compile(r'([A-Z]\d{5,7})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)')
-            for p in pdf.pages:
-                lines = (p.extract_text() or '').split('\n')
-                i=0
-                while i<len(lines):
-                    mm = pat.search(lines[i])
-                    if mm:
-                        r,e,ps,qs = mm.groups()
-                        desc = lines[i+1] if i+1<len(lines) else ''
-                        q = int(qs.replace('.','').replace(',',''))
-                        u = num(ps)
-                        records.append({
-                          'Reference':r,'Code EAN':e,
-                          'Description':desc,'Quantity':q,
-                          'Unit Price':u,'Total Price':u*q
-                        })
-                        i+=2
-                    else: i+=1
-            cols = ['Reference','Code EAN','Description','Quantity','Unit Price','Total Price']
+            return {'statusCode':400,'body':'No pude determinar tipo'}
+
+    def num(s):
+        s = (s or '').strip()
+        return float(s.replace('.','').replace(',','.')) if s else 0.0
+
+    records = []
+    if doc_type == 'factura':
+        m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', first)
+        base = m.group(1) if m else None
+        if not base:
+            return {'statusCode':400,'body':'No número de factura'}
+        line_pat = re.compile(r'^([A-Z]\d{5,7})\s+(\d{13})\s+(\d{6,8})\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)$')
+        origin = ''
+        # extraer texto completo
+        full = extract_text(pdf_path)
+        for ln in full.split('\n'):
+            up = ln.upper()
+            if "PAYS D'ORIGINE" in ln:
+                origin = ln.split(':',1)[-1].strip()
+            mm = line_pat.match(ln.strip())
+            if mm:
+                ref, ean, custom, qty_s, unit_s, tot_s = mm.groups()
+                inv = base + 'PLV' if 'FACTURE SANS PAIEMENT' in up else base
+                records.append({
+                    'Reference': ref,
+                    'Code EAN': ean,
+                    'Custom Code': custom,
+                    'Description': '',
+                    'Origin': origin,
+                    'Quantity': int(qty_s),
+                    'Unit Price': num(unit_s),
+                    'Total Price': num(tot_s),
+                    'Invoice Number': inv
+                })
+        headers = ['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
+
+    else:  # proforma
+        line_pat = re.compile(r'([A-Z]\d{5,7})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)')
+        full = extract_text(pdf_path)
+        lines = full.split('\n')
+        i = 0
+        while i < len(lines):
+            mm = line_pat.search(lines[i])
+            if mm:
+                ref, ean, price_s, qty_s = mm.groups()
+                desc = lines[i+1].strip() if i+1 < len(lines) else ''
+                qty = int(qty_s.replace('.','').replace(',',''))
+                unit = num(price_s)
+                records.append({
+                    'Reference': ref,
+                    'Code EAN': ean,
+                    'Description': desc,
+                    'Quantity': qty,
+                    'Unit Price': unit,
+                    'Total Price': unit * qty
+                })
+                i += 2
+            else:
+                i += 1
+        headers = ['Reference','Code EAN','Description','Quantity','Unit Price','Total Price']
 
     if not records:
         return {'statusCode':400,'body':'Sin registros extraídos.'}
 
-    df = pd.DataFrame(records)[cols]
+    # crear Excel en memoria
+    wb = Workbook()
+    ws = wb.active
+    ws.append(headers)
+    for r in records:
+        ws.append([r[h] for h in headers])
+
+    # volcar a base64
     from io import BytesIO
     buf = BytesIO()
-    df.to_excel(buf, index=False)
+    wb.save(buf)
     return {
-      'statusCode':200,
-      'isBase64Encoded': True,
-      'headers': {
-        'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-        'Content-Disposition':'attachment; filename="extracted_data.xlsx"'
-      },
-      'body': base64.b64encode(buf.getvalue()).decode()
+        'statusCode': 200,
+        'isBase64Encoded': True,
+        'headers': {
+            'Content-Type':'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'Content-Disposition':'attachment; filename="extracted_data.xlsx"'
+        },
+        'body': base64.b64encode(buf.getvalue()).decode()
     }
+
