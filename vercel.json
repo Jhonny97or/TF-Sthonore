@@ -1,6 +1,9 @@
 {
+  "version": 2,
   "functions": {
-    "api/convert.py": { "runtime": "python3.9" }
+    "api/convert.py": {
+      "runtime": "@vercel/[email protected]"
+    }
   },
   "rewrites": [
     { "source": "/", "destination": "/index.html" }
