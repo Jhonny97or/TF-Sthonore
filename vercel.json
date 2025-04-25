@@ -1,13 +1,23 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/convert.py", "use": "@vercel/python" },
-    { "src": "index.html",     "use": "@vercel/static" }
+    {
+      "src": "api/convert.py",
+      "use": "@vercel/python"
+    },
+    {
+      "src": "index.html",
+      "use": "@vercel/static"
+    }
   ],
   "routes": [
-    // cuando llamas a /api/convert, lo mapea internamente a la función y le pasa path "/"
-    { "src": "/api/convert", "dest": "api/convert.py" },
-    // todo lo demás sirve index.html
-    { "src": "/(.*)",        "dest": "/index.html" }
+    {
+      "src": "/api/convert",
+      "dest": "api/convert.py"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/index.html"
+    }
   ]
 }
