@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <title>PDF → Excel</title>
+</head>
+<body>
+  <h1>Convertir PDF (factura/proforma) a Excel</h1>
+  <form id="f">
+    <input type="file" name="file" accept="application/pdf" required/>
+    <fieldset>
+      <label><input type="radio" name="type" value="auto" checked/> Auto-detect</label>
+      <label><input type="radio" name="type" value="factura"/> Factura</label>
+      <label><input type="radio" name="type" value="proforma"/> Proforma</label>
+    </fieldset>
+    <button type="submit">Transformar PDF a Excel</button>
+  </form>
+  <script>
+    const form = document.getElementById('f');
+    form.addEventListener('submit', async e => {
+      e.preventDefault();
+      const data = new FormData(form);
+      const res = await fetch('/api/convert', { method:'POST', body:data });
+      if (!res.ok) return alert('Error: '+await res.text());
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'extracted_data.xlsx';
+      a.click();
+    });
+  </script>
+</body>
+</html>
