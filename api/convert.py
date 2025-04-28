@@ -1,3 +1,4 @@
+
 import logging
 # Suprime los warnings de pdfminer sobre CropBox
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
