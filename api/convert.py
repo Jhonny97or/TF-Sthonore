@@ -1,16 +1,16 @@
-
 import logging
-# Suprime los warnings de pdfminer sobre CropBox
-logging.getLogger("pdfminer").setLevel(logging.ERROR)
-logging.getLogger("pdfminer.pdfpage").setLevel(logging.ERROR)
-
 from flask import Flask, request, send_file
 from io import BytesIO
 import re, warnings, tempfile, traceback
-from pdfminer.high_level import extract_text
-from openpyxl import Workbook
 
+# Suprime los warnings de pdfminer
+logging.getLogger("pdfminer").setLevel(logging.ERROR)
+logging.getLogger("pdfminer.pdfpage").setLevel(logging.ERROR)
 warnings.filterwarnings('ignore', category=UserWarning)
+
+from pdfminer.high_level import extract_text
+import pdfplumber
+from openpyxl import Workbook
 
 app = Flask(__name__)
 
@@ -18,107 +18,109 @@ app = Flask(__name__)
 @app.route('/api/convert', methods=['POST'])
 def convert():
     try:
+        # 1) Validación de upload
         if 'file' not in request.files:
             return "No file uploaded", 400
         file = request.files['file']
         doc_type = request.form.get('type', 'auto')
 
-        # Guardar PDF en temporal
+        # 2) Guardar PDF en archivo temporal
         tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
         file.save(tmp.name)
         pdf_path = tmp.name
 
-        # Extraer texto de la primera página
+        # 3) Extraer texto de primera página para detección
         text_first = extract_text(pdf_path, page_numbers=[0]) or ""
         first = text_first.upper()
 
-        # Detectar tipo si es “auto”
+        # 4) Logs para depurar
+        print(">>> DOC_TYPE inicial:", doc_type)
+        print(">>> Muestra de primeras 10 líneas:", text_first.split("\n")[:10])
+
+        # 5) Detección automática de tipo
         if doc_type == 'auto':
-            if ('ACCUSE' in first and 'RECEPTION' in first) or 'ACKNOWLEDGE' in first:
+            if any(k in first for k in ('ACCUSE', 'RECEPTION', 'ACKNOWLEDGE')):
                 doc_type = 'proforma'
             elif 'FACTURE' in first or 'INVOICE' in first:
                 doc_type = 'factura'
             else:
                 return "No pude determinar tipo", 400
 
+        # 6) Helper para convertir string a float
         def num(s):
-            s = (s or '').strip()
-            return float(s.replace('.','').replace(',','.')) if s else 0.0
+            return float(s.replace('.', '').replace(',', '.')) if s else 0.0
 
         records = []
+        headers = []
 
-        # ================= FACTURA =================
-        if doc_type == 'factura':
-            # buscar número tras “INVOICE WITHOUT PAYMENT” o “FACTURE SANS PAIEMENT”
-            lines0 = text_first.split('\n')
-            base = None
-            for i, ln in enumerate(lines0):
-                up = ln.upper()
-                if 'INVOICE WITHOUT PAYMENT' in up or 'FACTURE SANS PAIEMENT' in up:
-                    if i+1 < len(lines0) and re.match(r'^\d{6,}$', lines0[i+1].strip()):
-                        base = lines0[i+1].strip()
-                        break
-            # fallback regex
-            if not base:
-                m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', first)
-                base = m.group(1) if m else None
+        # 7) Intentar extraer tabla con pdfplumber (solo primera página)
+        with pdfplumber.open(pdf_path) as pdf:
+            page0 = pdf.pages[0]
+            table = page0.extract_table()
 
-            if not base:
-                return "No número de factura", 400
+        if doc_type == 'factura' and table:
+            # Asumimos que table[0] son headers
+            raw_headers = table[0]
+            for row in table[1:]:
+                # Ajusta índices si tu tabla tiene más columnas
+                ref, ean, custom, qty_s, unit_s, tot_s = (row + ['']*6)[:6]
+                records.append({
+                    'Reference': ref.strip(),
+                    'Code EAN': ean.strip(),
+                    'Custom Code': custom.strip(),
+                    'Quantity': int(qty_s.replace('.', '').strip()),
+                    'Unit Price': num(unit_s),
+                    'Total Price': num(tot_s),
+                    'Invoice Number': ''  # pondremos después
+                })
+            # Extraer número de factura del texto
+            m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', first)
+            inv_num = m.group(1) if m else ''
+            for r in records:
+                r['Invoice Number'] = inv_num
 
-            pat = re.compile(r'^([A-Z]\d{5,7})\s+(\d{13})\s+(\d{6,8})\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)$')
-            origin = ''
+            headers = [
+                'Reference','Code EAN','Custom Code',
+                'Quantity','Unit Price','Total Price','Invoice Number'
+            ]
+
+        else:
+            # Fallback basado en regex genérica para línea por línea
+            pat = re.compile(
+                r'^\s*([A-Z0-9]{5,10})\s+'   # Reference
+                r'(\d{8,14})\s+'             # EAN
+                r'([A-Z0-9\-]+)\s+'          # Custom Code
+                r'(\d+)\s+'                  # Quantity
+                r'([\d.,]+)\s+'              # Unit Price
+                r'([\d.,]+)\s*$'             # Total Price
+            )
             full = extract_text(pdf_path) or ""
             for ln in full.split('\n'):
-                up = ln.upper()
-                if "PAYS D'ORIGINE" in up:
-                    origin = ln.split(':',1)[-1].strip()
-                mm = pat.match(ln.strip())
+                mm = pat.match(ln)
                 if mm:
                     ref, ean, custom, qty_s, unit_s, tot_s = mm.groups()
-                    inv = base + 'PLV' if 'FACTURE SANS PAIEMENT' in up else base
                     records.append({
                         'Reference': ref,
                         'Code EAN': ean,
                         'Custom Code': custom,
-                        'Description': '',
-                        'Origin': origin,
                         'Quantity': int(qty_s),
                         'Unit Price': num(unit_s),
                         'Total Price': num(tot_s),
-                        'Invoice Number': inv
+                        'Invoice Number': ''
                     })
-            headers = ['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
+            # Número de factura/proforma
+            m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', first)
+            inv_num = m.group(1) if m else ''
+            for r in records:
+                r['Invoice Number'] = inv_num
 
-        # ================= PROFORMA =================
-        else:
-            pat = re.compile(r'([A-Z]\d{5,7})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)')
-            full = extract_text(pdf_path) or ""
-            lines = full.split('\n')
-            i = 0
-            while i < len(lines):
-                mm = pat.search(lines[i])
-                if mm:
-                    ref, ean, price_s, qty_s = mm.groups()
-                    desc = lines[i+1].strip() if i+1<len(lines) else ''
-                    qty = int(qty_s.replace('.','').replace(',',''))
-                    unit = num(price_s)
-                    records.append({
-                        'Reference': ref,
-                        'Code EAN': ean,
-                        'Description': desc,
-                        'Quantity': qty,
-                        'Unit Price': unit,
-                        'Total Price': unit*qty
-                    })
-                    i += 2
-                else:
-                    i += 1
-            headers = ['Reference','Code EAN','Description','Quantity','Unit Price','Total Price']
+            headers = [
+                'Reference','Code EAN','Custom Code',
+                'Quantity','Unit Price','Total Price','Invoice Number'
+            ]
 
-        # Depuración: mostrar primeras 100 líneas si no extrajo nada
+        # 8) Si no halló nada, preview para depurar
         if not records:
-            full = extract_text(pdf_path) or ""
             preview = "\n".join(full.split('\n')[:100])
             return (
                 "Sin registros extraídos.\n"
@@ -126,17 +128,18 @@ def convert():
                 f"{preview}"
             ), 400
 
-        # Generar Excel en memoria
+        # 9) Generar Excel en memoria
         wb = Workbook()
         ws = wb.active
         ws.append(headers)
         for r in records:
-            ws.append([r[h] for h in headers])
+            ws.append([r.get(h, '') for h in headers])
 
         buf = BytesIO()
         wb.save(buf)
         buf.seek(0)
 
+        # 10) Enviar archivo al cliente
         return send_file(
             buf,
             as_attachment=True,
@@ -147,3 +150,6 @@ def convert():
     except Exception:
         tb = traceback.format_exc()
         return f"❌ Error interno en la función:\n{tb}", 500
+
+if __name__ == '__main__':
+    app.run(debug=True)
