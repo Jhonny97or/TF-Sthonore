@@ -9,14 +9,18 @@ import pdfplumber
 from pdfminer.high_level import extract_text
 from openpyxl import Workbook
 
-# 1) Suprime warnings de pdfminer
+# Suprime warnings de pdfminer
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 logging.getLogger("pdfminer.pdfpage").setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
-@app.route("/", methods=["POST"])
+@app.route("/", methods=["GET", "POST"])
 def convert():
+    # Respuesta para GET, evita 404 al navegar manualmente
+    if request.method == "GET":
+        return "Convertidor PDF→Excel activo. Usa POST para enviar tu PDF.", 200
+
     try:
         # — Validar que venga el PDF —
         if 'file' not in request.files:
@@ -35,7 +39,7 @@ def convert():
 
         # — Auto-detectar tipo —
         if doc_type == 'auto':
-            if any(k in first for k in ('ACCUSE','RECEPTION','ACKNOWLEDGE')):
+            if any(k in first for k in ('ACCUSE', 'RECEPTION', 'ACKNOWLEDGE')):
                 doc_type = 'proforma'
             elif 'FACTURE' in first or 'INVOICE' in first:
                 doc_type = 'factura'
@@ -48,7 +52,7 @@ def convert():
 
         records = []
 
-        # — Primero, intento con pdfplumber —
+        # — Intento con pdfplumber —
         with pdfplumber.open(pdf_path) as pdf:
             table = pdf.pages[0].extract_table()
 
@@ -60,7 +64,7 @@ def convert():
                     'Reference': ref.strip(),
                     'Code EAN': ean.strip(),
                     'Custom Code': custom.strip(),
-                    'Quantity': int(qty_s.replace('.','').strip()),
+                    'Quantity': int(qty_s.replace('.', '').strip()),
                     'Unit Price': num(unit_s),
                     'Total Price': num(tot_s),
                     'Invoice Number': ''
@@ -133,3 +137,4 @@ def convert():
     except Exception:
         tb = traceback.format_exc()
         return f"❌ Error interno:\n{tb}", 500
+
