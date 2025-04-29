@@ -1,33 +1,52 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-  <meta charset="utf-8"/>
+  <meta charset="utf-8" />
   <title>PDF → Excel</title>
+  <style>
+    body{font-family:sans-serif;max-width:600px;margin:3rem auto}
+    fieldset{margin:1rem 0}
+    button{padding:.6rem 1.2rem;font-size:1rem}
+  </style>
 </head>
 <body>
-  <h1>Convertir PDF (factura/proforma) a Excel</h1>
-  <form id="f">
-    <input type="file" name="file" accept="application/pdf" required/>
+  <h1>Convertir PDF (factura / proforma) a Excel</h1>
+
+  <form id="f" enctype="multipart/form-data">
+    <input type="file" name="file" accept="application/pdf" required />
+
     <fieldset>
-      <label><input type="radio" name="type" value="auto" checked/> Auto-detect</label>
-      <label><input type="radio" name="type" value="factura"/> Factura</label>
-      <label><input type="radio" name="type" value="proforma"/> Proforma</label>
+      <legend>Tipo de documento</legend>
+      <label><input type="radio" name="type" value="auto" checked /> Auto-detect</label>
+      <label><input type="radio" name="type" value="factura" /> Factura</label>
+      <label><input type="radio" name="type" value="proforma" /> Proforma</label>
     </fieldset>
-    <button type="submit">Transformar PDF a Excel</button>
+
+    <button type="submit">Transformar PDF → Excel</button>
   </form>
+
   <script>
     const form = document.getElementById('f');
+
     form.addEventListener('submit', async e => {
       e.preventDefault();
+
       const data = new FormData(form);
-      const res = await fetch('/api/convert', { method:'POST', body:data });
-      if (!res.ok) return alert('Error: '+await res.text());
+      const res  = await fetch('/api/convert', { method: 'POST', body: data });
+
+      if (!res.ok) {
+        alert('Error: ' + await res.text());
+        return;
+      }
+
       const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
+      const url  = URL.createObjectURL(blob);
+
       const a = document.createElement('a');
       a.href = url;
       a.download = 'extracted_data.xlsx';
       a.click();
+      URL.revokeObjectURL(url);
     });
   </script>
 </body>
