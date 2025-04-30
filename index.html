@@ -5,98 +5,143 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Convertidor PDF → Excel | Saint-Honoré</title>
 
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Poppins:wght@700;800&display=swap" rel="stylesheet" />
-
+  <!-- Tipografías corporativas -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Poppins:wght@700;800&display=swap" rel="stylesheet" />
   <style>
-    :root{--orange:#ff9d00;--orange-dark:#ff512f;--gray-bg:#f3f5f7;--gray-600:#5a5f66;--radius:14px}
-    *,*:before,*:after{box-sizing:border-box;margin:0;padding:0}
-    body{font-family:'Inter',sans-serif;background:var(--gray-bg);display:flex;justify-content:center;align-items:flex-start;min-height:100vh;padding:2rem;color:#222}
-    .card{width:100%;max-width:520px;background:#fff;border-radius:var(--radius);box-shadow:0 10px 35px rgba(0,0,0,.08);overflow:hidden;animation:fadeIn .8s ease-out}
-    @keyframes fadeIn{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
-    .hero{position:relative;padding:3.5rem 2rem 3rem;background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);color:#fff}
-    .hero::after{content:'';position:absolute;inset:0;background:radial-gradient(circle at 30% 30%,rgba(255,255,255,.25) 0,transparent 60%);mix-blend-mode:overlay}
-    .hero h1{font-family:'Poppins',sans-serif;font-size:2.35rem;line-height:1.1;font-weight:800}
-    .hero h1 span{display:block}
-    .hero p{margin-top:.8rem;font-size:1rem;opacity:.95}
-    .brand{position:absolute;top:1.2rem;right:1.5rem;font-style:italic;font-size:.9rem;opacity:.9}
-    form{padding:2.25rem 2rem 2.6rem;display:flex;flex-direction:column;gap:1.6rem}
-    .file-wrapper{display:flex;align-items:center;border:2px solid #e1e4e9;border-radius:var(--radius);overflow:hidden}
-    .file-btn{background:var(--gray-600);color:#fff;padding:.85rem 1.2rem;font-size:.88rem;user-select:none}
-    .file-wrapper input[type=file]{flex:1;border:none;padding:.8rem .95rem;cursor:pointer}
-    .btn{border:none;border-radius:var(--radius);padding:.9rem 1rem;font-size:1.05rem;font-weight:600;background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);color:#fff;cursor:pointer;transition:transform .15s,box-shadow .15s}
-    .btn:hover{transform:translateY(-2px);box-shadow:0 7px 18px rgba(0,0,0,.15)}
+    :root{
+      --orange:#ff9d00;
+      --orange-dark:#ff512f;
+      --gray-bg:#f6f8fa;
+      --gray-700:#444;
+      --radius:14px;
+    }
+    @media(prefers-color-scheme:dark){
+      :root{--gray-bg:#1e2227;--gray-700:#d0d0d0}
+      body{color:#e6e6e6}
+    }
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+    body{
+      font-family:'Inter',sans-serif;background:var(--gray-bg);
+      display:flex;justify-content:center;align-items:flex-start;
+      min-height:100vh;padding:2rem 1rem;transition:background .3s
+    }
+    .card{
+      width:100%;max-width:560px;background:#fff;border-radius:var(--radius);
+      box-shadow:0 12px 38px rgba(0,0,0,.1);overflow:hidden;
+      animation:float .6s ease-out;
+    }
+    @media(prefers-color-scheme:dark){ .card{background:#2c3139} }
+    @keyframes float{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+
+    /* ─── CABECERA ─── */
+    .hero{
+      padding:4.2rem 2rem 3.2rem;
+      background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);
+      color:#fff;position:relative;isolation:isolate
+    }
+    .hero::after{
+      content:'';position:absolute;inset:0;z-index:-1;
+      background:radial-gradient(circle at 25% 30%,rgba(255,255,255,.24) 0,transparent 60%);
+      mix-blend-mode:overlay
+    }
+    .hero h1{font-family:'Poppins',sans-serif;font-size:2.6rem;line-height:1.1;font-weight:800}
+    .hero span{display:block}
+    .hero p{margin-top:.9rem;font-size:1.05rem;opacity:.95}
+    .brand{position:absolute;top:1rem;right:1.5rem;font-style:italic;font-size:.95rem;opacity:.9}
+
+    /* ─── FORM ─── */
+    form{padding:2.5rem 2rem 3rem;display:flex;flex-direction:column;gap:1.8rem}
+    .file-box{
+      border:2px solid #dadde2;border-radius:var(--radius);
+      display:flex;align-items:center;overflow:hidden
+    }
+    .file-btn{
+      background:#333;color:#fff;padding:.95rem 1.4rem;font-size:.9rem;
+      user-select:none;white-space:nowrap
+    }
+    .file-box input[type=file]{flex:1;border:none;padding:1rem .95rem;cursor:pointer}
+    .btn{
+      border:none;border-radius:var(--radius);padding:1rem 1.1rem;font-size:1.08rem;font-weight:600;
+      color:#fff;background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);
+      cursor:pointer;transition:.15s transform,.15s box-shadow
+    }
+    .btn:hover{transform:translateY(-2px);box-shadow:0 8px 22px rgba(0,0,0,.17)}
     .btn:disabled{opacity:.6;cursor:not-allowed;transform:none;box-shadow:none}
+
+    /* Spinner */
+    #spinner{
+      position:fixed;inset:0;display:grid;place-items:center;background:rgba(0,0,0,.35);
+      backdrop-filter:blur(2px);visibility:hidden;opacity:0;transition:.25s
+    }
+    #spinner.show{visibility:visible;opacity:1}
+    .lds-dual{
+      width:64px;height:64px;position:relative
+    }
+    .lds-dual:after,.lds-dual:before{
+      content:"";box-sizing:border-box;position:absolute;inset:0;border-radius:50%;
+      border:6px solid transparent;border-top-color:#fff;animation:spin 1s linear infinite
+    }
+    .lds-dual:after{border:6px solid transparent;border-bottom-color:#fff;animation-delay:-.5s}
+    @keyframes spin{to{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
 
+  <div id="spinner">
+    <div class="lds-dual"></div>
+  </div>
+
   <div class="card">
     <header class="hero">
       <span class="brand">saint · honoré</span>
-      <h1>Convertidor<br><span>PDF a Excel</span></h1>
-      <p>Sube tu factura o proforma y obtén un Excel listo para usar</p>
+      <h1><span>Convertidor</span>PDF → Excel</h1>
+      <p>Convierte tus facturas o proformas a un formato útil en segundos</p>
     </header>
 
-    <!-- Evitamos navegación sin JS -->
     <form id="f" action="javascript:void(0)" enctype="multipart/form-data">
-      <div class="file-wrapper">
-        <span class="file-btn" id="fileLabel">SELECCIONAR PDF</span>
+      <div class="file-box">
+        <span class="file-btn" id="fileLbl">SELECCIONAR PDF</span>
         <input type="file" name="file" accept="application/pdf" required />
       </div>
       <input type="hidden" name="type" value="auto" />
-      <button id="convertBtn" class="btn" type="button">Convertir</button>
+      <button id="btn" class="btn" type="button">Convertir</button>
     </form>
   </div>
 
   <script>
-    const fileInput  = document.querySelector('input[type=file]');
-    const fileLabel  = document.getElementById('fileLabel');
-    const form       = document.getElementById('f');
-    const btn        = document.getElementById('convertBtn');
+    /* refs */
+    const fileInput = document.querySelector('input[type=file]');
+    const fileLbl   = document.getElementById('fileLbl');
+    const btn       = document.getElementById('btn');
+    const form      = document.getElementById('f');
+    const spinner   = document.getElementById('spinner');
 
-    /* Mostrar nombre elegido */
-    fileInput.addEventListener('change', () => {
-      fileLabel.textContent = fileInput.files.length
-        ? '✔ ' + fileInput.files[0].name
+    fileInput.addEventListener('change',()=>{
+      fileLbl.textContent = fileInput.files.length
+        ? '✔︎ ' + fileInput.files[0].name
         : 'SELECCIONAR PDF';
     });
 
-    /* Conversión */
-    btn.addEventListener('click', async () => {
-      if (!fileInput.files.length) {
-        alert('Primero selecciona un PDF.'); return;
-      }
+    btn.addEventListener('click', async ()=>{
+      if(!fileInput.files.length){ alert('Selecciona un PDF primero'); return; }
 
-      btn.disabled = true;            // feedback visual
-      btn.textContent = 'Convirtiendo…';
-      console.clear();
-      console.time('convert');        // medición simple
+      btn.disabled = true; spinner.classList.add('show');
 
-      try {
-        const data = new FormData(form);
-        const res  = await fetch('/api/convert', { method:'POST', body:data });
-
-        if (!res.ok) {
-          const msg = await res.text();
-          console.error('Backend respondió', res.status, msg);
-          alert('Error (' + res.status + '): ' + msg);
-          return;
-        }
+      try{
+        const res = await fetch('/api/convert', { method:'POST', body:new FormData(form) });
+        if(!res.ok){ alert('Error '+res.status+': '+await res.text()); return; }
 
         const blob = await res.blob();
         const url  = URL.createObjectURL(blob);
-        const a    = document.createElement('a');
-        a.href = url; a.download = 'extracted_data.xlsx'; a.click();
+        Object.assign(document.createElement('a'),{href:url,download:'extracted_data.xlsx'}).click();
         URL.revokeObjectURL(url);
-      } catch (err) {
-        console.error(err);
-        alert('❌ Error de red o tamaño de archivo.\nConsulta la consola (F12 ▸ Console).');
-      } finally {
-        console.timeEnd('convert');
-        btn.disabled = false;
-        btn.textContent = 'Convertir';
+      }catch(e){
+        console.error(e); alert('Fallo la conexión o el archivo es demasiado grande.');
+      }finally{
+        btn.disabled = false; spinner.classList.remove('show');
       }
     });
   </script>
 </body>
 </html>
+
