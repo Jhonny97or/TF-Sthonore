@@ -25,6 +25,7 @@
     .file-wrapper input[type=file]{flex:1;border:none;padding:.8rem .95rem;cursor:pointer}
     .btn{border:none;border-radius:var(--radius);padding:.9rem 1rem;font-size:1.05rem;font-weight:600;background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);color:#fff;cursor:pointer;transition:transform .15s,box-shadow .15s}
     .btn:hover{transform:translateY(-2px);box-shadow:0 7px 18px rgba(0,0,0,.15)}
+    .btn:disabled{opacity:.6;cursor:not-allowed;transform:none;box-shadow:none}
   </style>
 </head>
 <body>
@@ -36,22 +37,66 @@
       <p>Sube tu factura o proforma y obtén un Excel listo para usar</p>
     </header>
 
-    <!-- NOTE: action=javascript:void(0) impide navegación aun sin JS -->
+    <!-- Evitamos navegación sin JS -->
     <form id="f" action="javascript:void(0)" enctype="multipart/form-data">
       <div class="file-wrapper">
         <span class="file-btn" id="fileLabel">SELECCIONAR PDF</span>
         <input type="file" name="file" accept="application/pdf" required />
       </div>
       <input type="hidden" name="type" value="auto" />
-      <!-- cambiamos a button, no submit -->
       <button id="convertBtn" class="btn" type="button">Convertir</button>
     </form>
   </div>
 
   <script>
-    /* Mostrar nombre del archivo */
-    const fileInput = document.querySelector('input[type=file]');
-    const fileLabel = document.getElementById('fileLabel');
-    fileInput.addEventListener('change', () => {
-      fileLabel.textContent = fileInput.files
+    const fileInput  = document.querySelector('input[type=file]');
+    const fileLabel  = document.getElementById('fileLabel');
+    const form       = document.getElementById('f');
+    const btn        = document.getElementById('convertBtn');
 
+    /* Mostrar nombre elegido */
+    fileInput.addEventListener('change', () => {
+      fileLabel.textContent = fileInput.files.length
+        ? '✔ ' + fileInput.files[0].name
+        : 'SELECCIONAR PDF';
+    });
+
+    /* Conversión */
+    btn.addEventListener('click', async () => {
+      if (!fileInput.files.length) {
+        alert('Primero selecciona un PDF.'); return;
+      }
+
+      btn.disabled = true;            // feedback visual
+      btn.textContent = 'Convirtiendo…';
+      console.clear();
+      console.time('convert');        // medición simple
+
+      try {
+        const data = new FormData(form);
+        const res  = await fetch('/api/convert', { method:'POST', body:data });
+
+        if (!res.ok) {
+          const msg = await res.text();
+          console.error('Backend respondió', res.status, msg);
+          alert('Error (' + res.status + '): ' + msg);
+          return;
+        }
+
+        const blob = await res.blob();
+        const url  = URL.createObjectURL(blob);
+        const a    = document.createElement('a');
+        a.href = url; a.download = 'extracted_data.xlsx'; a.click();
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        console.error(err);
+        alert('❌ Error de red o tamaño de archivo.\nConsulta la consola (F12 ▸ Console).');
+      } finally {
+        console.timeEnd('convert');
+        btn.disabled = false;
+        btn.textContent = 'Convertir';
+      }
+    });
+  </script>
+</body>
+</html>
