@@ -1,3 +1,11 @@
+# api/convert.py  – versión mínima con la corrección -----------------
+import logging, re, tempfile, traceback          # ← re vuelve aquí
+from io import BytesIO
+from flask import Flask, request, send_file
+import pdfplumber
+from pdfminer.high_level import extract_text
+from openpyxl import Workbook
+
 # … imports y helpers iguales …
 
 INV_PAT  = re.compile(r'(?:FACTURE|INVOICE)[^\d]{0,60}(\d{6,})', re.I)
