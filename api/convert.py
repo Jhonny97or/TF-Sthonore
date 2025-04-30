@@ -1,4 +1,4 @@
-"""PDF → Excel (factura / proforma) – función Vercel /api/convert"""
+"""PDF → Excel (factura / proforma) – función /api/convert para Vercel"""
 
 # ─── 1) IMPORTS ────────────────────────────────────────────────────
 import logging, re, tempfile, traceback
@@ -48,13 +48,12 @@ def convert():
         first = extract_text(tmp.name, page_numbers=[0]) or ''
         kind  = detect_doc_type(first)
 
-        # contexto inicial (primera página)
-        m_inv = INV_PAT.search(first)
-        inv_base = m_inv.group(1) if m_inv else ''
+        # contexto inicial
+        inv_base = (INV_PAT.search(first).group(1)
+                    if INV_PAT.search(first) else '')
         add_plv  = 'FACTURE SANS PAIEMENT' in first.upper()
-
-        m_org = ORIG_PAT.search(first)
-        origin = m_org.group(1).strip() if m_org else ''
+        origin   = (ORIG_PAT.search(first).group(1).strip()
+                    if ORIG_PAT.search(first) else '')
 
         rows = []
 
@@ -73,11 +72,13 @@ def convert():
                 i = 0
                 while i < len(lines):
                     line = lines[i].strip()
+
                     if kind == 'factura':
-                        mrow = ROW_FACT.match(line)
-                        if mrow:
-                            ref, ean, custom, qty_s, unit_s, tot_s = mrow.groups()
-                            desc = lines[i+1].strip() if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]) else ''
+                        if (mo := ROW_FACT.match(line)):
+                            ref, ean, custom, qty_s, unit_s, tot_s = mo.groups()
+                            desc = (lines[i+1].strip()
+                                    if i+1 < len(lines) and not ROW_FACT.match(lines[i+1])
+                                    else '')
                             qty  = int(qty_s.replace('.','').replace(',',''))
                             rows.append({
                                 'Reference': ref,
@@ -92,8 +93,7 @@ def convert():
                             })
                             i += 1
                     else:  # proforma
-                        mp = ROW_PROF.search(line)
-                        if mp:
+                        if (mp := ROW_PROF.search(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
                             qty  = int(qty_s.replace('.','').replace(',',''))
@@ -118,16 +118,19 @@ def convert():
                 ['Reference','Code EAN','Description','Origin',
                  'Quantity','Unit Price','Total Price'])
 
-        wb, ws = Workbook(), Workbook().active   # (wb creado una sola vez)
-        wb = Workbook(); ws = wb.active
+        wb = Workbook()
+        ws = wb.active
         ws.append(cols)
         for r in rows:
             ws.append([r.get(c,'') for c in cols])
 
-        buf = BytesIO(); wb.save(buf); buf.seek(0)
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
         return send_file(buf, as_attachment=True,
                          download_name='extracted_data.xlsx',
                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception:
         logging.error(traceback.format_exc())
         return f'❌ Error:\n{traceback.format_exc()}', 500
+
