@@ -5,152 +5,55 @@
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>Convertidor PDF → Excel | Saint-Honoré</title>
 
-  <!-- Google Fonts → Poppins para titulares, Inter para textos -->
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Poppins:wght@600;800&display=swap" rel="stylesheet" />
+  <!-- Google Fonts -->
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500&family=Poppins:wght@700;800&display=swap" rel="stylesheet" />
 
   <style>
-    /* ───── variables de marca ───── */
     :root{
       --orange:#ff9d00;
       --orange-dark:#ff512f;
-      --orange-light:#ffcc6f;
       --gray-bg:#f3f5f7;
-      --gray-300:#e1e5ea;
       --gray-600:#5a5f66;
       --radius:14px;
     }
-
-    /* ───── reset mínimo ───── */
     *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-
     body{
       font-family:'Inter',sans-serif;
       background:var(--gray-bg);
-      color:#222;
-      display:flex;
-      align-items:flex-start;
-      justify-content:center;
-      min-height:100vh;
-      padding:2rem 1rem;
+      display:flex;justify-content:center;align-items:flex-start;
+      min-height:100vh;padding:2rem 1rem;color:#222;
     }
-
-    /* ───── tarjeta principal ───── */
     .card{
-      width:100%;
-      max-width:540px;
-      background:#fff;
-      border-radius:var(--radius);
-      box-shadow:0 10px 35px rgba(0,0,0,.08);
-      overflow:hidden;
-      animation:floatIn .8s ease-out;
+      width:100%;max-width:520px;background:#fff;border-radius:var(--radius);
+      box-shadow:0 10px 35px rgba(0,0,0,.08);overflow:hidden;
+      animation:fadeIn .8s ease-out;
     }
-    @keyframes floatIn{
-      0%{opacity:0;transform:translateY(20px)}
-      100%{opacity:1;transform:none}
-    }
+    @keyframes fadeIn{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
 
-    /* ───── cabecera con degradado ───── */
-    .hero{
-      position:relative;
-      padding:3.5rem 2rem 3rem;
+    /* hero */
+    .hero{position:relative;padding:3.5rem 2rem 3rem;
       background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);
-      color:#fff;
-    }
+      color:#fff}
     .hero::after{
-      content:'';
-      position:absolute;
-      inset:0;
+      content:'';position:absolute;inset:0;
       background:radial-gradient(circle at 30% 30%,rgba(255,255,255,.25) 0,transparent 60%);
-      mix-blend-mode:overlay;
-    }
-    .brand{
-      position:absolute;
-      top:1.25rem;
-      right:1.5rem;
-      font-size:.9rem;
-      font-style:italic;
-      opacity:.9;
-    }
-    .hero h1{
-      font-family:'Poppins',sans-serif;
-      font-size:2.5rem;
-      line-height:1.1;
-      font-weight:800;
-    }
+      mix-blend-mode:overlay}
+    .hero h1{font-family:'Poppins',sans-serif;font-size:2.35rem;line-height:1.1;font-weight:800}
     .hero h1 span{display:block}
-    .hero p{
-      margin-top:.75rem;
-      font-size:1rem;
-      opacity:.95;
-    }
+    .hero p{margin-top:.8rem;font-size:1rem;opacity:.95}
+    .brand{position:absolute;top:1.2rem;right:1.5rem;font-style:italic;font-size:.9rem;opacity:.9}
 
-    /* ───── formulario ───── */
-    form{
-      padding:2.25rem 2rem 2.5rem;
-      display:flex;
-      flex-direction:column;
-      gap:1.4rem;
-    }
-    label{font-size:.95rem;color:var(--gray-600);margin-bottom:.4rem;display:block}
-
-    select,
-    input[type="file"]{
-      width:100%;
-      padding:.7rem .95rem;
-      font-size:1rem;
-      border:2px solid var(--gray-300);
-      border-radius:var(--radius);
-      background:#fff url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="14" height="10" fill="%235a5f66"><path d="M7 10 0 0h14L7 10Z"/></svg>') no-repeat right .9rem center;
-      appearance:none;
-      cursor:pointer;
-      transition:border .2s;
-    }
-    select:focus,
-    input[type="file"]:focus{
-      outline:none;
-      border-color:var(--orange-dark);
-    }
-    /* input file hack: ocultamos texto y customizamos botón */
-    .file-wrapper{
-      display:flex;
-      align-items:center;
-      border:2px solid var(--gray-300);
-      border-radius:var(--radius);
-      overflow:hidden;
-    }
-    .file-wrapper input[type="file"]{
-      flex:1 1 auto;
-      border:none;
-      background:none;
-    }
-    .file-btn{
-      background:var(--gray-600);
-      color:#fff;
-      padding:.85rem 1.2rem;
-      font-size:.88rem;
-      flex:0 0 auto;
-    }
-
-    /* ───── botón principal ───── */
-    .btn{
-      border:none;
-      cursor:pointer;
-      font-size:1.05rem;
-      font-weight:600;
-      padding:.85rem 1rem;
-      border-radius:var(--radius);
-      color:#fff;
-      background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);
-      transition:transform .15s,box-shadow .15s;
-    }
+    /* formulario */
+    form{padding:2.25rem 2rem 2.6rem;display:flex;flex-direction:column;gap:1.6rem}
+    .file-wrapper{display:flex;align-items:center;border:2px solid #e1e4e9;border-radius:var(--radius);overflow:hidden}
+    .file-btn{background:var(--gray-600);color:#fff;padding:.85rem 1.2rem;font-size:.88rem}
+    .file-wrapper input[type=file]{flex:1;border:none;padding:.8rem .95rem;cursor:pointer}
+    /* botón */
+    .btn{border:none;border-radius:var(--radius);padding:.9rem 1rem;font-size:1.05rem;font-weight:600;
+      background:linear-gradient(135deg,var(--orange) 0%,var(--orange-dark) 100%);color:#fff;cursor:pointer;
+      transition:transform .15s,box-shadow .15s}
     .btn:hover{transform:translateY(-2px);box-shadow:0 7px 18px rgba(0,0,0,.15)}
-    .btn:active{transform:translateY(0)}
-
-    /* ───── responsive: reducir padding en móviles pequeños ───── */
-    @media(max-width:380px){
-      .hero{padding:3rem 1.3rem 2.5rem}
-      form{padding:2rem 1.3rem 2.25rem}
-    }
+    .btn:active{transform:none}
   </style>
 </head>
 <body>
@@ -158,78 +61,23 @@
   <div class="card">
     <header class="hero">
       <span class="brand">saint · honoré</span>
-      <h1>
-        Convertidor<br>
-        <span>PDF a Excel</span>
-      </h1>
-      <p>Transforma tus facturas a un formato útil</p>
+      <h1>Convertidor<br><span>PDF a Excel</span></h1>
+      <p>Sube tu factura o proforma y obtén un Excel listo para usar</p>
     </header>
 
     <form id="f" enctype="multipart/form-data">
-      <!-- marca -->
-      <div>
-        <label for="brand">Selecciona la marca de tu factura</label>
-        <select id="brand" name="brand" required>
-          <option value="" disabled selected>Seleccionar</option>
-          <option>Marca A</option>
-          <option>Marca B</option>
-          <option>Marca C</option>
-        </select>
-      </div>
-
-      <!-- tipo -->
-      <div>
-        <label for="type">Selecciona el tipo de documento</label>
-        <select id="type" name="type" required>
-          <option value="" disabled selected>Seleccionar</option>
-          <option value="factura">Factura</option>
-          <option value="proforma">Proforma</option>
-          <option value="auto">Auto-detectar</option>
-        </select>
-      </div>
-
       <!-- archivo -->
       <div class="file-wrapper">
-        <span class="file-btn">SELECCIONAR ARCHIVO</span>
+        <span class="file-btn" id="fileLabel">SELECCIONAR PDF</span>
         <input type="file" name="file" accept="application/pdf" required />
       </div>
+
+      <!-- campo oculto para que el backend use auto-detect -->
+      <input type="hidden" name="type" value="auto" />
 
       <button class="btn" type="submit">Convertir</button>
     </form>
   </div>
 
-  <script>
-    // Para mostrar nombre de archivo junto al botón
-    const fileInput = document.querySelector('input[type="file"]');
-    fileInput.addEventListener('change', () => {
-      const label = document.querySelector('.file-btn');
-      label.textContent = fileInput.files.length
-        ? '✔ ' + fileInput.files[0].name
-        : 'SELECCIONAR ARCHIVO';
-    });
+ 
 
-    // Envío al backend
-    const form = document.getElementById('f');
-    form.addEventListener('submit', async (e) => {
-      e.preventDefault();
-
-      const data = new FormData(form);
-      const res  = await fetch('/api/convert', { method:'POST', body:data });
-
-      if (!res.ok) {
-        alert('Error: ' + await res.text());
-        return;
-      }
-
-      const blob = await res.blob();
-      const url  = URL.createObjectURL(blob);
-
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'extracted_data.xlsx';
-      a.click();
-      URL.revokeObjectURL(url);
-    });
-  </script>
-</body>
-</html>
