@@ -1,43 +1,9 @@
-import logging, re, tempfile, traceback
-from io import BytesIO
-from flask import Flask, request, send_file
-import pdfplumber
-from pdfminer.high_level import extract_text
-from openpyxl import Workbook
+# … imports y helpers iguales …
 
-logging.getLogger("pdfminer").setLevel(logging.ERROR)
-app = Flask(__name__)
+INV_PAT  = re.compile(r'(?:FACTURE|INVOICE)[^\d]{0,60}(\d{6,})', re.I)
+ORIG_PAT = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
 
-# ───────── helpers ─────────
-def fnum(s: str) -> float:
-    s = (s or '').strip().replace('.', '').replace(',', '.')
-    return float(s) if s else 0.0
-
-TYPE_PAT  = re.compile(r'(FACTURE SANS PAIEMENT|FACTURE|INVOICE|PROFORMA)', re.I)
-INV_PAT   = re.compile(r'(?:FACTURE|INVOICE)[^\d]{0,50}(\d{6,})', re.I)
-ORIG_PAT  = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
-
-ROW_FACT  = re.compile(
-    r'^([A-Z]\w{3,11})\s+'        # Reference
-    r'(\d{12,14})\s+'             # EAN
-    r'(\d{6,9})\s+'               # Custom/Nomenclature
-    r'(\d[\d.,]*)\s+'             # Qty
-    r'([\d.,]+)\s+'               # Unit
-    r'([\d.,]+)\s*$'              # Total
-)
-ROW_PROF  = re.compile(
-    r'([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)'
-)
-
-def detect_doc_type(first_page: str) -> str:
-    up = first_page.upper()
-    if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up):
-        return 'proforma'
-    if 'FACTURE' in up or 'INVOICE' in up:
-        return 'factura'
-    raise ValueError('No pude determinar tipo (factura / proforma).')
-
-# ───────── endpoint ─────────
+# ─────── endpoint ───────
 @app.route('/', methods=['POST'])
 @app.route('/api/convert', methods=['POST'])
 def convert():
@@ -51,10 +17,15 @@ def convert():
         first_txt = extract_text(tmp.name, page_numbers=[0]) or ''
         doc_type  = detect_doc_type(first_txt)
 
-        current_origin  = ''
-        current_invbase = ''
-        add_plv         = False
-        records         = []
+        # ── INIT: invoice y origin vistas en la 1ª página ──
+        base_match = INV_PAT.search(first_txt)
+        current_invbase = base_match.group(1) if base_match else ''
+        add_plv         = 'FACTURE SANS PAIEMENT' in first_txt.upper()
+
+        o_match = ORIG_PAT.search(first_txt)
+        current_origin = o_match.group(1).strip() if o_match else ''
+
+        records = []
 
         with pdfplumber.open(tmp.name) as pdf:
             for pg in pdf.pages:
@@ -62,20 +33,21 @@ def convert():
                 lines = text.split('\n')
                 up    = text.upper()
 
-                # — actualizar invoice number si en esta página hay cabecera —
-                head = INV_PAT.search(text)
-                if head:
-                    current_invbase = head.group(1)
+                # si esta página declara un NUEVO invoice, actualizamos
+                m_inv = INV_PAT.search(text)
+                if m_inv:
+                    current_invbase = m_inv.group(1)
                     add_plv = 'FACTURE SANS PAIEMENT' in up
 
-                # — actualizar origin si la página lo declara —
-                o = ORIG_PAT.search(text)
-                if o:
-                    current_origin = o.group(1).strip()
+                # si esta página declara un NUEVO origin, actualizamos
+                m_org = ORIG_PAT.search(text)
+                if m_org:
+                    current_origin = m_org.group(1).strip()
 
                 i = 0
                 while i < len(lines):
                     line = lines[i].strip()
+
                     if doc_type == 'factura':
                         mo = ROW_FACT.match(line)
                         if mo:
@@ -83,33 +55,29 @@ def convert():
                             desc = ''
                             if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
                                 desc = lines[i+1].strip()
-                            qty  = int(qty_s.replace('.', '').replace(',', ''))
-                            rec  = {
-                                'Reference'   : ref,
-                                'Code EAN'    : ean,
-                                'Custom Code' : custom,
-                                'Description' : desc,
-                                'Origin'      : current_origin,
-                                'Quantity'    : qty,
-                                'Unit Price'  : fnum(unit_s),
-                                'Total Price' : fnum(tot_s),
+                            qty  = int(qty_s.replace('.','').replace(',',''))
+                            records.append({
+                                'Reference': ref, 'Code EAN': ean, 'Custom Code': custom,
+                                'Description': desc,
+                                'Origin': current_origin,
+                                'Quantity': qty,
+                                'Unit Price': fnum(unit_s),
+                                'Total Price': fnum(tot_s),
                                 'Invoice Number': (current_invbase + 'PLV') if add_plv else current_invbase
-                            }
-                            records.append(rec)
-                            i += 1          # saltar descripción
+                            })
+                            i += 1
                     else:  # proforma
                         mp = ROW_PROF.search(line)
                         if mp:
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
-                            qty  = int(qty_s.replace('.', '').replace(',', ''))
-                            rec  = {
-                                'Reference'  : ref, 'Code EAN': ean,
+                            qty  = int(qty_s.replace('.','').replace(',',''))
+                            records.append({
+                                'Reference': ref, 'Code EAN': ean,
                                 'Description': desc, 'Origin': current_origin,
-                                'Quantity'   : qty, 'Unit Price': fnum(unit_s),
+                                'Quantity': qty, 'Unit Price': fnum(unit_s),
                                 'Total Price': fnum(unit_s)*qty
-                            }
-                            records.append(rec)
+                            })
                     i += 1
 
         if not records:
@@ -131,4 +99,3 @@ def convert():
     except Exception:
         logging.error(traceback.format_exc())
         return f'❌ Error interno:\n{traceback.format_exc()}', 500
-
