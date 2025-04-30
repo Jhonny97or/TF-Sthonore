@@ -1,14 +1,11 @@
 """
-Función serverless para Vercel que convierte un PDF (factura o proforma)
-en un Excel descargable.  Rutas aceptadas:
-  • POST /api/convert  (producción en Vercel)
-  • POST /            (útil para pruebas locales)
+Función serverless (Vercel) que detecta automáticamente si el PDF es
+FACTURA o PROFORMA y genera un Excel con todas las columnas:
+Reference, Code EAN, Custom Code, Description, Origin, Quantity,
+Unit Price, Total Price, Invoice Number (solo facturas).
 """
 
-import logging
-import tempfile
-import traceback
-import re
+import logging, re, tempfile, traceback
 from io import BytesIO
 
 from flask import Flask, request, send_file
@@ -16,128 +13,141 @@ import pdfplumber
 from pdfminer.high_level import extract_text
 from openpyxl import Workbook
 
-# Suprimir warnings ruidosos de pdfminer
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
-# ──────────────────────────── Helpers ─────────────────────────────
-def _num(s: str) -> float:
-    """Convierte '1.234,56'  →  1234.56"""
-    s = (s or "").strip()
-    return float(s.replace('.', '').replace(',', '.')) if s else 0.0
+# ───────────────────────── helpers ─────────────────────────
+def parse_num(s: str) -> float:
+    """Convierte '1.234,56' ➜ 1234.56"""
+    return float(s.replace('.', '').replace(',', '.').strip()) if s else 0.0
 
 
-def _factura_regex(text: str) -> str | None:
-    """Extrae el número de factura de la primera página (6+ dígitos)."""
-    m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,40}(\d{6,})', text.upper())
-    return m.group(1) if m else None
+def detect_doc_type(first_page_text: str) -> str:
+    txt = first_page_text.upper()
+    if ('ACCUSE' in txt and 'RECEPTION' in txt) or 'ACKNOWLEDGE' in txt or 'PROFORMA' in txt:
+        return 'proforma'
+    if 'FACTURE' in txt or 'INVOICE' in txt:
+        return 'factura'
+    raise ValueError('No pude determinar si es factura o proforma.')
 
 
-# ─────────────────────────── Endpoints ────────────────────────────
-@app.route("/", methods=["GET", "POST"])
-@app.route("/api/convert", methods=["GET", "POST"])
+# ───────────────────────── endpoint ─────────────────────────
+@app.route("/", methods=["POST"])           # útil si haces curl local
+@app.route("/api/convert", methods=["POST"]) # ruta oficial en Vercel
 def convert():
-    # GET simple para evitar 404 al navegar manualmente
-    if request.method == "GET":
-        return "Convertidor PDF → Excel activo. Envía un POST con tu PDF.", 200
-
-    # 1) Validar archivo
-    if "file" not in request.files:
-        return "No file uploaded", 400
-
-    uploaded = request.files["file"]
-    doc_type = request.form.get("type", "auto").lower()
-
     try:
-        # 2) Guardar PDF en /tmp (sistema de archivos temporal de Vercel)
-        tmp_pdf = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
-        uploaded.save(tmp_pdf.name)
-        pdf_path = tmp_pdf.name
+        if 'file' not in request.files:
+            return "No file uploaded", 400
 
-        # 3) Leer texto de la 1ª página para detectar tipo
-        first_page_text = extract_text(pdf_path, page_numbers=[0]) or ""
-        upper_first = first_page_text.upper()
+        uploaded = request.files['file']
 
-        if doc_type == "auto":
-            if ("ACCUSE" in upper_first and "RECEPTION" in upper_first) or "ACKNOWLEDGE" in upper_first:
-                doc_type = "proforma"
-            elif "FACTURE" in upper_first or "INVOICE" in upper_first:
-                doc_type = "factura"
-            else:
-                return "No pude determinar si es factura o proforma", 400
+        # Guarda PDF en /tmp (lectura más rápida)
+        pdf_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".pdf")
+        uploaded.save(pdf_tmp.name)
 
-        # 4) Extraer líneas
-        records: list[dict] = []
+        # Detectar tipo
+        first_txt = (extract_text(pdf_tmp.name, page_numbers=[0]) or "")
+        doc_type  = detect_doc_type(first_txt)
+        print('🛈 Documento detectado como:', doc_type)
 
-        with pdfplumber.open(pdf_path) as pdf:
-            for page in pdf.pages:
-                txt = page.extract_text() or ""
+        records = []
+        with pdfplumber.open(pdf_tmp.name) as pdf:
+            if doc_type == 'factura':
+                # 1) Invoice base
+                m = re.search(r'(?:FACTURE|INVOICE)[^\d]{0,50}?(\d{6,})', first_txt, re.I)
+                invoice_base = m.group(1) if m else None
+                if not invoice_base:
+                    cands = re.findall(r'(\d{8,})', first_txt)
+                    invoice_base = cands[0] if cands else None
+                if not invoice_base:
+                    raise ValueError('No encontré número de factura.')
 
-                if doc_type == "factura":
-                    # ref  EAN  custom  qty  unit  total
-                    pat = re.compile(
-                        r'^([A-Z]\d{5,7})\s+(\d{13})\s+(\d{6,8})\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)$'
-                    )
-                    for ln in txt.split("\n"):
-                        m = pat.match(ln.strip())
-                        if m:
-                            ref, ean, custom, qty_s, unit_s, tot_s = m.groups()
-                            records.append({
-                                "Reference": ref,
-                                "Code EAN": ean,
-                                "Custom Code": custom,
-                                "Quantity": int(qty_s),
-                                "Unit Price": _num(unit_s),
-                                "Total Price": _num(tot_s),
-                            })
-                else:  # proforma
-                    # ref  EAN  price  qty
-                    pat = re.compile(r'([A-Z]\d{5,7})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)')
-                    lines = txt.split("\n")
+                # 2) Recorrido de páginas
+                origin = ''
+                detail_pat = re.compile(
+                    r'^([A-Z]\d+)\s+(\d{13})\s+(\d{6,8})\s+(\d+)\s+([\d.,]+)\s+([\d.,]+)$'
+                )
+                for page in pdf.pages:
+                    txt  = page.extract_text() or ''
+                    lines = txt.split('\n')
+                    up   = txt.upper()
+                    inv_num = invoice_base + 'PLV' if 'FACTURE SANS PAIEMENT' in up else invoice_base
+
+                    # PAYS D'ORIGINE
+                    for L in lines:
+                        if "PAYS D'ORIGINE" in L:
+                            parts = L.split(':',1)
+                            if len(parts)==2: origin = parts[1].strip()
+
                     i = 0
                     while i < len(lines):
-                        m = pat.search(lines[i])
-                        if m:
-                            ref, ean, price_s, qty_s = m.groups()
-                            qty = int(qty_s.replace('.', '').replace(',', ''))
-                            unit = _num(price_s)
+                        m2 = detail_pat.match(lines[i].strip())
+                        if m2:
+                            ref, ean, custom, qty_s, unit_s, tot_s = m2.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
                             records.append({
-                                "Reference": ref,
-                                "Code EAN": ean,
-                                "Description": desc,
-                                "Quantity": qty,
-                                "Unit Price": unit,
-                                "Total Price": unit * qty,
+                                'Reference':      ref,
+                                'Code EAN':       ean,
+                                'Custom Code':    custom,
+                                'Description':    desc,
+                                'Origin':         origin,
+                                'Quantity':       int(qty_s),
+                                'Unit Price':     parse_num(unit_s),
+                                'Total Price':    parse_num(tot_s),
+                                'Invoice Number': inv_num
                             })
-                            i += 2
-                        else:
-                            i += 1
+                            i += 1  # saltar descripción
+                        i += 1
+
+            else:  # PROFORMA
+                origin = ''
+                for page in pdf.pages:
+                    txt   = page.extract_text() or ''
+                    lines = txt.split('\n')
+
+                    # PAYS D'ORIGINE
+                    for L in lines:
+                        if "PAYS D'ORIGINE" in L:
+                            parts = L.split(':',1)
+                            if len(parts)==2: origin = parts[1].strip()
+
+                    for idx, line in enumerate(lines):
+                        m = re.search(r'([A-Z]\d{5,7})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)', line)
+                        if m:
+                            ref, ean, unit_s, qty_s = m.groups()
+                            desc = lines[idx+1].strip() if idx+1 < len(lines) else ''
+                            qty  = int(qty_s.replace('.','').replace(',','').strip())
+                            unit = parse_num(unit_s)
+                            records.append({
+                                'Reference':   ref,
+                                'Code EAN':    ean,
+                                'Description': desc,
+                                'Origin':      origin,
+                                'Quantity':    qty,
+                                'Unit Price':  unit,
+                                'Total Price': unit*qty
+                            })
 
         if not records:
-            return "Sin registros extraídos – verifica el PDF", 400
+            return 'Sin registros extraídos; revisa el PDF.', 400
 
-        # 5) Generar Excel en memoria
-        headers = list(records[0].keys())
-        wb = Workbook()
-        ws = wb.active
-        ws.append(headers)
-        for row in records:
-            ws.append([row[h] for h in headers])
+        # Ordenar columnas según tipo
+        cols_fact = ['Reference','Code EAN','Custom Code','Description','Origin',
+                     'Quantity','Unit Price','Total Price','Invoice Number']
+        cols_prof = ['Reference','Code EAN','Description','Origin',
+                     'Quantity','Unit Price','Total Price']
 
-        buf = BytesIO()
-        wb.save(buf)
-        buf.seek(0)
+        headers = cols_fact if 'Invoice Number' in records[0] else cols_prof
 
-        # 6) Responder con el archivo
+        # Generar Excel en memoria
+        wb = Workbook(); ws = wb.active; ws.append(headers)
+        for r in records: ws.append([r.get(h,'') for h in headers])
+        buf = BytesIO(); wb.save(buf); buf.seek(0)
+
         return send_file(
             buf,
             as_attachment=True,
             download_name="extracted_data.xlsx",
-            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-    except Exception:
-        tb = traceback.format_exc()
-        return f"❌ Error interno:\n{tb}", 500
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+       
