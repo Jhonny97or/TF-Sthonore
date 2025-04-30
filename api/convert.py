@@ -1,4 +1,4 @@
-# api/convert.py  – versión mínima con la corrección -----------------
+# api/convert.py  – versión mínima con la corrección ------------------
 import logging, re, tempfile, traceback          # ← re vuelve aquí
 from io import BytesIO
 from flask import Flask, request, send_file
