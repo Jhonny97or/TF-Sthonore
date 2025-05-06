@@ -1,4 +1,4 @@
-# ─── 1) IMPORTS ────────────────────────────────────────────────────
+# ── 1) IMPORTS ─────────────────────────────────────────────────────
 import logging, re, tempfile, traceback, os
 from io import BytesIO
 from flask import Flask, request, send_file
@@ -9,7 +9,7 @@ from openpyxl import Workbook
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 app = Flask(__name__)
 
-# ─── 2) HELPERS ────────────────────────────────────────────────────
+# ── 2) HELPERS ─────────────────────────────────────────────────────
 def fnum(s: str) -> float:
     s = (s or '').strip().replace('.', '').replace(',', '.')
     return float(s) if s else 0.0
@@ -22,7 +22,7 @@ def detect_doc_type(txt: str) -> str:
         return 'factura'
     raise ValueError('Tipo de documento no reconocido.')
 
-# ─── 3) REGEX ──────────────────────────────────────────────────────
+# ── 3) REGEX ───────────────────────────────────────────────────────
 INV_PAT  = re.compile(r'(?:FACTURE|INVOICE)[^\d]{0,60}(\d{6,})', re.I)
 ORIG_PAT = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.*)", re.I)
 
@@ -33,7 +33,7 @@ ROW_PROF = re.compile(
     r'([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)'
 )
 
-# ─── 4) ENDPOINT ───────────────────────────────────────────────────
+# ── 4) ENDPOINT ────────────────────────────────────────────────────
 @app.route('/', methods=['POST'])
 @app.route('/api/convert', methods=['POST'])
 def convert():
@@ -42,94 +42,87 @@ def convert():
         if not files:
             return 'No file(s) uploaded', 400
 
-        rows = []                       # salida final
-        pending = []                    # filas sin origen aún
+        rows = []
 
         for uploaded in files:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             uploaded.save(tmp.name)
 
+            # ———————————————————————————————
+            # ① PASADA 1: índice factura → origen
+            # ———————————————————————————————
+            invoice_origin = {}          # { '102555271': 'Union …' }
+
+            with pdfplumber.open(tmp.name) as pdf:
+                cur_invoice = ''
+                for page in pdf.pages:
+                    txt = page.extract_text() or ''
+
+                    if m_inv := INV_PAT.search(txt):
+                        cur_invoice = m_inv.group(1)
+
+                    if m_ori := ORIG_PAT.search(txt):
+                        val = m_ori.group(1).strip()
+                        if val and cur_invoice and cur_invoice not in invoice_origin:
+                            invoice_origin[cur_invoice] = val
+
+            # ———————————————————————————————
+            # ② PASADA 2: extraer filas
+            # ———————————————————————————————
             first = extract_text(tmp.name, page_numbers=[0]) or ''
             kind  = detect_doc_type(first)
 
-            inv_base = INV_PAT.search(first).group(1) if INV_PAT.search(first) else ''
-            add_plv  = 'FACTURE SANS PAIEMENT' in first.upper()
-            origin   = ''                # valor conocido hasta el momento
+            inv_base = ''    # irá cambiando página a página
+            add_plv  = False
 
             with pdfplumber.open(tmp.name) as pdf:
                 for page in pdf.pages:
                     txt = page.extract_text() or ''
 
-                    # ─── Pre-escaneo de la página ──────────────────
-                    if (m_inv := INV_PAT.search(txt)):
+                    if m_inv := INV_PAT.search(txt):
                         inv_base = m_inv.group(1)
                         add_plv  = 'FACTURE SANS PAIEMENT' in txt.upper()
 
-                    if (m_orig := ORIG_PAT.search(txt)):
-                        val = m_orig.group(1).strip()
-                        if val:
-                            origin = val
-                            # Completar filas pendientes con este origen
-                            for r in pending:
-                                r['Origin'] = origin
-                            pending.clear()
+                    origin = invoice_origin.get(inv_base, '')
 
-                    # ─── Extraer filas ────────────────────────────
-                    lines = txt.split('\n')
-                    i = 0
-                    while i < len(lines):
-                        line = lines[i].strip()
+                    for line in txt.split('\n'):
+                        line = line.strip()
 
                         if kind == 'factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
-                            desc = lines[i+1].strip() if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]) else ''
-                            qty  = int(qty_s.replace('.','').replace(',',''))
-                            row  = {
+                            rows.append({
                                 'Reference': ref,
                                 'Code EAN': ean,
                                 'Custom Code': custom,
-                                'Description': desc,
+                                'Description': '',   # se podría recuperar como antes si lo necesitas
                                 'Origin': origin,
-                                'Quantity': qty,
+                                'Quantity': int(qty_s.replace('.','').replace(',','')),
                                 'Unit Price': fnum(unit_s),
                                 'Total Price': fnum(tot_s),
                                 'Invoice Number': inv_base + ('PLV' if add_plv else '')
-                            }
-                            rows.append(row)
-                            if not origin:
-                                pending.append(row)
-                            i += 1
+                            })
 
                         elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
-                            desc = lines[i+1].strip() if i+1 < len(lines) else ''
-                            qty  = int(qty_s.replace('.','').replace(',',''))
                             unit = fnum(unit_s)
-                            row  = {
+                            rows.append({
                                 'Reference': ref,
                                 'Code EAN': ean,
                                 'Custom Code': '',
-                                'Description': desc,
+                                'Description': '',
                                 'Origin': origin,
-                                'Quantity': qty,
+                                'Quantity': int(qty_s.replace('.','').replace(',','')),
                                 'Unit Price': unit,
-                                'Total Price': unit*qty,
+                                'Total Price': unit*int(qty_s.replace('.','').replace(',','')),
                                 'Invoice Number': inv_base + ('PLV' if add_plv else '')
-                            }
-                            rows.append(row)
-                            if not origin:
-                                pending.append(row)
-                        i += 1
+                            })
 
             os.unlink(tmp.name)
-
-        # Si llegamos al final y aún quedan pendientes (PDF nunca declaró origen)
-        # los dejamos vacíos; al menos no romperá.
 
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # ─── Generar Excel ───────────────────────────────────────────
+        # ——— Generar Excel ———
         cols = [
             'Reference','Code EAN','Custom Code','Description',
             'Origin','Quantity','Unit Price','Total Price','Invoice Number'
