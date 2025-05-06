@@ -48,57 +48,64 @@ def convert():
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
 
-            # Tipo de documento (para elegir regex de fila)
+            # Tipo de documento
             with pdfplumber.open(tmp.name) as pdf:
-                first_page_txt = pdf.pages[0].extract_text() or ''
-            kind = doc_kind(first_page_txt)
+                kind = doc_kind(pdf.pages[0].extract_text() or '')
 
-            # ── PARSEO SECUENCIAL ──────────────────────────────────────
-            current_inv   = ''
+            current_inv    = ''
+            add_plv_flag   = False
             current_origin = ''
-            add_plv_flag  = False
+            pending_rows   = []      # filas sin número de factura todavía
 
             with pdfplumber.open(tmp.name) as pdf:
                 for page in pdf.pages:
                     txt   = page.extract_text() or ''
                     lines = txt.split('\n')
 
-                    # ¿nuevo número de factura en la página?
+                    # ¿Se declara número de factura aquí?
                     if (m_inv := INV_PAT.search(txt)):
-                        current_inv = m_inv.group(1)
-                        # “FACTURE SANS PAIEMENT” vale para toda la factura
+                        current_inv  = m_inv.group(1)
                         add_plv_flag = bool(PLV_PAT.search(txt))
 
-                    # ¿nuevo origen explícito en la página?
+                        # → Completar todas las filas pendientes
+                        for r in pending_rows:
+                            r['Invoice Number'] = current_inv + ('PLV' if add_plv_flag else '')
+                        pending_rows.clear()
+
+                    # ¿Origen en esta página?
                     if (m_org := ORIG_PAT.search(txt)):
                         found = m_org.group(1).strip()
-                        if found:                      # ignorar líneas vacías
+                        if found:
                             current_origin = found
 
                     i = 0
                     while i < len(lines):
                         line = lines[i].strip()
 
-                        # ── filas de FACTURA ────────────────────────
+                        # ── Fila FACTURA ──────────────────────────
                         if kind == 'factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = ''
                             if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
                                 desc = lines[i+1].strip()
-                            rows.append({
+
+                            row = {
                                 'Reference'     : ref,
                                 'Code EAN'      : ean,
                                 'Custom Code'   : custom,
                                 'Description'   : desc,
-                                'Origin'        : current_origin,   # ← puede quedar vacío
+                                'Origin'        : current_origin,
                                 'Quantity'      : int(qty_s.replace('.','').replace(',','')),
                                 'Unit Price'    : fnum(unit_s),
                                 'Total Price'   : fnum(tot_s),
-                                'Invoice Number': current_inv + ('PLV' if add_plv_flag else '')
-                            })
+                                'Invoice Number': current_inv + ('PLV' if add_plv_flag else '') if current_inv else ''
+                            }
+                            rows.append(row)
+                            if not current_inv:
+                                pending_rows.append(row)
                             i += 1
 
-                        # ── filas de PROFORMA ───────────────────────
+                        # ── Fila PROFORMA ─────────────────────────
                         elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = ''
@@ -106,7 +113,8 @@ def convert():
                                 desc = lines[i+1].strip()
                             qty  = int(qty_s.replace('.','').replace(',',''))
                             unit = fnum(unit_s)
-                            rows.append({
+
+                            row = {
                                 'Reference'     : ref,
                                 'Code EAN'      : ean,
                                 'Custom Code'   : '',
@@ -115,8 +123,11 @@ def convert():
                                 'Quantity'      : qty,
                                 'Unit Price'    : unit,
                                 'Total Price'   : unit*qty,
-                                'Invoice Number': current_inv + ('PLV' if add_plv_flag else '')
-                            })
+                                'Invoice Number': current_inv + ('PLV' if add_plv_flag else '') if current_inv else ''
+                            }
+                            rows.append(row)
+                            if not current_inv:
+                                pending_rows.append(row)
                         i += 1
 
             os.unlink(tmp.name)
@@ -124,23 +135,20 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # ── 4) RELLENAR ORIGEN VACÍO SEGÚN FACTURA ─────────────────────
+        # ── Rellenar ORIGIN vacío cuando sea único por factura ───────────
         from collections import defaultdict
-        inv_to_origin = defaultdict(set)   # {invoice: {origen1, origen2…}}
-
+        inv_to_origin = defaultdict(set)
         for r in rows:
             if r['Origin']:
                 inv_to_origin[r['Invoice Number']].add(r['Origin'])
 
-        # Si en una factura hay **exactamente un** origen distinto y otros vacíos,
-        # copiamos ese único origen a los vacíos.
         for r in rows:
             if not r['Origin']:
-                uniq = inv_to_origin.get(r['Invoice Number'], set())
-                if len(uniq) == 1:
-                    r['Origin'] = next(iter(uniq))
+                origins = inv_to_origin.get(r['Invoice Number'], set())
+                if len(origins) == 1:
+                    r['Origin'] = next(iter(origins))
 
-        # ── 5) Generar Excel ──────────────────────────────────────────
+        # ── Generar Excel ────────────────────────────────────────────────
         cols = [
             'Reference','Code EAN','Custom Code','Description',
             'Origin','Quantity','Unit Price','Total Price','Invoice Number'
