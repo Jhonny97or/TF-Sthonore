@@ -53,30 +53,28 @@ def convert():
 
             inv_base = INV_PAT.search(first).group(1) if INV_PAT.search(first) else ''
             add_plv  = 'FACTURE SANS PAIEMENT' in first.upper()
-
-            origin = ''
+            origin   = ''
 
             with pdfplumber.open(tmp.name) as pdf:
                 for page in pdf.pages:
-                    lines = (page.extract_text() or '').split('\n')
+                    # ── 1) PRE-ESCANEO DE LA PÁGINA ─────────────────────
+                    txt = page.extract_text() or ''
+
+                    if (m_inv := INV_PAT.search(txt)):
+                        inv_base = m_inv.group(1)
+                        add_plv  = 'FACTURE SANS PAIEMENT' in txt.upper()
+
+                    if (m_orig := ORIG_PAT.search(txt)):
+                        val = m_orig.group(1).strip()
+                        if val:          # solo si trae algo
+                            origin = val
+
+                    # ── 2) EXTRAER FILAS ────────────────────────────────
+                    lines = txt.split('\n')
                     i = 0
                     while i < len(lines):
                         line = lines[i].strip()
 
-                        # ① cabecera de origen
-                        if (mo := ORIG_PAT.match(line)):
-                            val = mo.group(1).strip()
-                            if val:              # <--  FIX
-                                origin = val
-                            i += 1
-                            continue
-
-                        # ② nueva factura → sólo cambiamos número, no tocamos origin
-                        if (mInv := INV_PAT.search(line)):
-                            inv_base = mInv.group(1)
-                            add_plv  = 'FACTURE SANS PAIEMENT' in line.upper()
-
-                        # ③ fila FACTURA
                         if kind == 'factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]) else ''
@@ -94,7 +92,6 @@ def convert():
                             })
                             i += 1
 
-                        # ④ fila PROFORMA
                         elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
@@ -118,7 +115,7 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # ── Excel ──
+        # ── Generar Excel ────────────────────────────────────────────
         cols = [
             'Reference','Code EAN','Custom Code','Description',
             'Origin','Quantity','Unit Price','Total Price','Invoice Number'
@@ -133,7 +130,6 @@ def convert():
                          download_name='extracted_data.xlsx',
                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-    except Exception as e:
+    except Exception:
         logging.error(traceback.format_exc())
         return f'❌ Error:\n{traceback.format_exc()}', 500
-
