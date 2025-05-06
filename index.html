@@ -9,11 +9,8 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=Poppins:wght@700;800&display=swap" rel="stylesheet" />
   <style>
     :root{
-      --orange:#ff9d00;
-      --orange-dark:#ff512f;
-      --gray-bg:#f6f8fa;
-      --gray-700:#444;
-      --radius:14px;
+      --orange:#ff9d00;--orange-dark:#ff512f;
+      --gray-bg:#f6f8fa;--gray-700:#444;--radius:14px;
     }
     @media(prefers-color-scheme:dark){
       :root{--gray-bg:#1e2227;--gray-700:#d0d0d0}
@@ -28,9 +25,9 @@
     .card{
       width:100%;max-width:560px;background:#fff;border-radius:var(--radius);
       box-shadow:0 12px 38px rgba(0,0,0,.1);overflow:hidden;
-      animation:float .6s ease-out;
+      animation:float .6s ease-out
     }
-    @media(prefers-color-scheme:dark){ .card{background:#2c3139} }
+    @media(prefers-color-scheme:dark){.card{background:#2c3139}}
     @keyframes float{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
 
     /* ─── CABECERA ─── */
@@ -45,8 +42,7 @@
       mix-blend-mode:overlay
     }
     .hero h1{font-family:'Poppins',sans-serif;font-size:2.6rem;line-height:1.1;font-weight:800}
-    .hero span{display:block}
-    .hero p{margin-top:.9rem;font-size:1.05rem;opacity:.95}
+    .hero span{display:block}.hero p{margin-top:.9rem;font-size:1.05rem;opacity:.95}
     .brand{position:absolute;top:1rem;right:1.5rem;font-style:italic;font-size:.95rem;opacity:.9}
 
     /* ─── FORM ─── */
@@ -74,22 +70,19 @@
       backdrop-filter:blur(2px);visibility:hidden;opacity:0;transition:.25s
     }
     #spinner.show{visibility:visible;opacity:1}
-    .lds-dual{
-      width:64px;height:64px;position:relative
-    }
+    .lds-dual{width:64px;height:64px;position:relative}
     .lds-dual:after,.lds-dual:before{
-      content:"";box-sizing:border-box;position:absolute;inset:0;border-radius:50%;
-      border:6px solid transparent;border-top-color:#fff;animation:spin 1s linear infinite
+      content:"";position:absolute;inset:0;border-radius:50%;
+      border:6px solid transparent;border-top-color:#fff;animation:spin 1s linear infinite;
+      box-sizing:border-box
     }
-    .lds-dual:after{border:6px solid transparent;border-bottom-color:#fff;animation-delay:-.5s}
+    .lds-dual:after{border-bottom-color:#fff;animation-delay:-.5s}
     @keyframes spin{to{transform:rotate(360deg)}}
   </style>
 </head>
 <body>
 
-  <div id="spinner">
-    <div class="lds-dual"></div>
-  </div>
+  <div id="spinner"><div class="lds-dual"></div></div>
 
   <div class="card">
     <header class="hero">
@@ -98,12 +91,12 @@
       <p>Convierte tus facturas o proformas a un formato útil en segundos</p>
     </header>
 
+    <!-- NOTA: input[file] lleva 'multiple' -->
     <form id="f" action="javascript:void(0)" enctype="multipart/form-data">
       <div class="file-box">
-        <span class="file-btn" id="fileLbl">SELECCIONAR PDF</span>
-        <input type="file" name="file" accept="application/pdf" required />
+        <span class="file-btn" id="fileLbl">SELECCIONAR PDF(s)</span>
+        <input type="file" name="file" accept="application/pdf" multiple required />
       </div>
-      <input type="hidden" name="type" value="auto" />
       <button id="btn" class="btn" type="button">Convertir</button>
     </form>
   </div>
@@ -113,35 +106,14 @@
     const fileInput = document.querySelector('input[type=file]');
     const fileLbl   = document.getElementById('fileLbl');
     const btn       = document.getElementById('btn');
-    const form      = document.getElementById('f');
     const spinner   = document.getElementById('spinner');
 
-    fileInput.addEventListener('change',()=>{
+    /* Actualiza etiqueta cuando se seleccionan archivos */
+    fileInput.addEventListener('change', () => {
       fileLbl.textContent = fileInput.files.length
-        ? '✔︎ ' + fileInput.files[0].name
-        : 'SELECCIONAR PDF';
+        ? `✔︎ ${fileInput.files.length} archivo(s)`
+        : 'SELECCIONAR PDF(s)';
     });
 
-    btn.addEventListener('click', async ()=>{
-      if(!fileInput.files.length){ alert('Selecciona un PDF primero'); return; }
-
-      btn.disabled = true; spinner.classList.add('show');
-
-      try{
-        const res = await fetch('/api/convert', { method:'POST', body:new FormData(form) });
-        if(!res.ok){ alert('Error '+res.status+': '+await res.text()); return; }
-
-        const blob = await res.blob();
-        const url  = URL.createObjectURL(blob);
-        Object.assign(document.createElement('a'),{href:url,download:'extracted_data.xlsx'}).click();
-        URL.revokeObjectURL(url);
-      }catch(e){
-        console.error(e); alert('Fallo la conexión o el archivo es demasiado grande.');
-      }finally{
-        btn.disabled = false; spinner.classList.remove('show');
-      }
-    });
-  </script>
-</body>
-</html>
-
+    /* Enviar */
+    btn
