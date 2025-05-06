@@ -78,6 +78,14 @@
     }
     .lds-dual:after{border-bottom-color:#fff;animation-delay:-.5s}
     @keyframes spin{to{transform:rotate(360deg)}}
+
+    /* ─── PROGRESO ─── */
+    #progressWrap{display:none;flex-direction:column;gap:.6rem;align-items:center}
+    #progressBar{
+      width:100%;height:10px;background:#e4e7ed;border-radius:6px;overflow:hidden
+    }
+    #progressBar>div{height:100%;background:var(--orange-dark);width:0}
+    #status{text-align:center;font-size:.92rem;opacity:.85}
   </style>
 </head>
 <body>
@@ -91,29 +99,96 @@
       <p>Convierte tus facturas o proformas a un formato útil en segundos</p>
     </header>
 
-    <!-- NOTA: input[file] lleva 'multiple' -->
     <form id="f" action="javascript:void(0)" enctype="multipart/form-data">
       <div class="file-box">
         <span class="file-btn" id="fileLbl">SELECCIONAR PDF(s)</span>
         <input type="file" name="file" accept="application/pdf" multiple required />
       </div>
       <button id="btn" class="btn" type="button">Convertir</button>
+
+      <!-- Barra de progreso + estado -->
+      <div id="progressWrap">
+        <div id="progressBar"><div></div></div>
+        <div id="status">Subiendo… 0 %</div>
+      </div>
     </form>
   </div>
 
   <script>
-    /* refs */
-    const fileInput = document.querySelector('input[type=file]');
-    const fileLbl   = document.getElementById('fileLbl');
-    const btn       = document.getElementById('btn');
-    const spinner   = document.getElementById('spinner');
+  const fileInput = document.querySelector('input[type=file]');
+  const fileLbl   = document.getElementById('fileLbl');
+  const btn       = document.getElementById('btn');
+  const spinner   = document.getElementById('spinner');
+  const progressWrap = document.getElementById('progressWrap');
+  const progressBar  = document.querySelector('#progressBar div');
+  const statusTxt    = document.getElementById('status');
 
-    /* Actualiza etiqueta cuando se seleccionan archivos */
-    fileInput.addEventListener('change', () => {
-      fileLbl.textContent = fileInput.files.length
-        ? `✔︎ ${fileInput.files.length} archivo(s)`
-        : 'SELECCIONAR PDF(s)';
-    });
+  fileInput.addEventListener('change', () => {
+    fileLbl.textContent = fileInput.files.length
+      ? `✔︎ ${fileInput.files.length} archivo(s)`
+      : 'SELECCIONAR PDF(s)';
+  });
 
-    /* Enviar */
-    btn
+  btn.addEventListener('click', () => {
+    if (!fileInput.files.length){
+      alert('Selecciona al menos un PDF'); return;
+    }
+
+    /* FormData con TODOS los PDF */
+    const data = new FormData();
+    [...fileInput.files].forEach(f => data.append('file', f));
+
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/convert', true);
+
+    /* --- Progreso de la subida --- */
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable){
+        const pct = Math.round((e.loaded / e.total) * 100);
+        progressBar.style.width = pct + '%';
+        statusTxt.textContent = 'Subiendo… ' + pct + ' %';
+      }
+    };
+    xhr.upload.onload = () => { statusTxt.textContent = 'Procesando…'; };
+
+    /* --- Respuesta lista --- */
+    xhr.onreadystatechange = () => {
+      if (xhr.readyState !== 4) return;
+
+      spinner.classList.remove('show');
+      btn.disabled = false;
+
+      if (xhr.status !== 200){
+        alert('Error ' + xhr.status + ': ' + xhr.responseText);
+        progressWrap.style.display = 'none';
+        progressBar.style.width = '0'; return;
+      }
+
+      const blob = xhr.response;
+      const url  = URL.createObjectURL(blob);
+      Object.assign(document.createElement('a'), {
+        href:url, download:'extracted_data.xlsx'
+      }).click();
+      URL.revokeObjectURL(url);
+
+      /* Reset UI */
+      progressWrap.style.display = 'none';
+      progressBar.style.width = '0';
+      statusTxt.textContent = '';
+      fileInput.value = '';
+      fileLbl.textContent = 'SELECCIONAR PDF(s)';
+    };
+
+    /* --- Preparar UI y enviar --- */
+    progressWrap.style.display = 'flex';
+    progressBar.style.width = '0';
+    statusTxt.textContent = 'Subiendo… 0 %';
+    btn.disabled = true;
+    spinner.classList.add('show');
+
+    xhr.responseType = 'blob';
+    xhr.send(data);
+  });
+  </script>
+</body>
+</html>
