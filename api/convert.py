@@ -48,72 +48,57 @@ def convert():
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
 
-            # ===== PASADA 1: construir índice {factura: {origin, plv}} =====
-            meta = {}          # p.e. {'102555272': {'origin':'Union …', 'plv':True}}
-            cur_inv = ''
+            # Tipo de documento (para elegir regex de fila)
+            with pdfplumber.open(tmp.name) as pdf:
+                first_page_txt = pdf.pages[0].extract_text() or ''
+            kind = doc_kind(first_page_txt)
+
+            # ── PARSEO SECUENCIAL ──────────────────────────────────────
+            current_inv   = ''
+            current_origin = ''
+            add_plv_flag  = False
 
             with pdfplumber.open(tmp.name) as pdf:
-                for page in pdf.pages:
-                    txt = page.extract_text() or ''
-
-                    if m := INV_PAT.search(txt):
-                        cur_inv = m.group(1)
-                        meta.setdefault(cur_inv, {'origin':'', 'plv':False})
-
-                    if cur_inv:
-                        if ORIG_PAT.search(txt):
-                            val = ORIG_PAT.search(txt).group(1).strip()
-                            if val:
-                                meta[cur_inv]['origin'] = val
-                        if PLV_PAT.search(txt):
-                            meta[cur_inv]['plv'] = True
-
-            # ===== PASADA 2: extraer filas con datos completos ============
-            kind = doc_kind(pdfplumber.open(tmp.name).pages[0].extract_text())
-
-            with pdfplumber.open(tmp.name) as pdf:
-                cur_inv = ''
                 for page in pdf.pages:
                     txt   = page.extract_text() or ''
                     lines = txt.split('\n')
 
-                    # Actualizar número de factura / flag PLV al entrar a página
-                    if m := INV_PAT.search(txt):
-                        cur_inv = m.group(1)
+                    # ¿nuevo número de factura en la página?
+                    if (m_inv := INV_PAT.search(txt)):
+                        current_inv = m_inv.group(1)
+                        # “FACTURE SANS PAIEMENT” vale para toda la factura
+                        add_plv_flag = bool(PLV_PAT.search(txt))
 
-                    # Si aún no hemos visto inv, toma el primero del índice
-                    if not cur_inv and meta:
-                        cur_inv = next(iter(meta))
-
-                    inv_info = meta.get(cur_inv, {'origin':'','plv':False})
-                    origin   = inv_info['origin']
-                    add_plv  = inv_info['plv']
+                    # ¿nuevo origen explícito en la página?
+                    if (m_org := ORIG_PAT.search(txt)):
+                        found = m_org.group(1).strip()
+                        if found:                      # ignorar líneas vacías
+                            current_origin = found
 
                     i = 0
                     while i < len(lines):
                         line = lines[i].strip()
 
-                        # ── Factura ───────────────────────────────
+                        # ── filas de FACTURA ────────────────────────
                         if kind == 'factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
-                            # descripción = línea siguiente si no es otra fila
                             desc = ''
                             if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
                                 desc = lines[i+1].strip()
                             rows.append({
-                                'Reference': ref,
-                                'Code EAN': ean,
-                                'Custom Code': custom,
-                                'Description': desc,
-                                'Origin': origin,
-                                'Quantity': int(qty_s.replace('.','').replace(',','')),
-                                'Unit Price': fnum(unit_s),
-                                'Total Price': fnum(tot_s),
-                                'Invoice Number': cur_inv + ('PLV' if add_plv else '')
+                                'Reference'     : ref,
+                                'Code EAN'      : ean,
+                                'Custom Code'   : custom,
+                                'Description'   : desc,
+                                'Origin'        : current_origin,   # ← puede quedar vacío
+                                'Quantity'      : int(qty_s.replace('.','').replace(',','')),
+                                'Unit Price'    : fnum(unit_s),
+                                'Total Price'   : fnum(tot_s),
+                                'Invoice Number': current_inv + ('PLV' if add_plv_flag else '')
                             })
                             i += 1
 
-                        # ── Proforma ──────────────────────────────
+                        # ── filas de PROFORMA ───────────────────────
                         elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = ''
@@ -122,15 +107,15 @@ def convert():
                             qty  = int(qty_s.replace('.','').replace(',',''))
                             unit = fnum(unit_s)
                             rows.append({
-                                'Reference': ref,
-                                'Code EAN': ean,
-                                'Custom Code': '',
-                                'Description': desc,
-                                'Origin': origin,
-                                'Quantity': qty,
-                                'Unit Price': unit,
-                                'Total Price': unit*qty,
-                                'Invoice Number': cur_inv + ('PLV' if add_plv else '')
+                                'Reference'     : ref,
+                                'Code EAN'      : ean,
+                                'Custom Code'   : '',
+                                'Description'   : desc,
+                                'Origin'        : current_origin,
+                                'Quantity'      : qty,
+                                'Unit Price'    : unit,
+                                'Total Price'   : unit*qty,
+                                'Invoice Number': current_inv + ('PLV' if add_plv_flag else '')
                             })
                         i += 1
 
@@ -139,7 +124,23 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # ===== Generar Excel ============================================
+        # ── 4) RELLENAR ORIGEN VACÍO SEGÚN FACTURA ─────────────────────
+        from collections import defaultdict
+        inv_to_origin = defaultdict(set)   # {invoice: {origen1, origen2…}}
+
+        for r in rows:
+            if r['Origin']:
+                inv_to_origin[r['Invoice Number']].add(r['Origin'])
+
+        # Si en una factura hay **exactamente un** origen distinto y otros vacíos,
+        # copiamos ese único origen a los vacíos.
+        for r in rows:
+            if not r['Origin']:
+                uniq = inv_to_origin.get(r['Invoice Number'], set())
+                if len(uniq) == 1:
+                    r['Origin'] = next(iter(uniq))
+
+        # ── 5) Generar Excel ──────────────────────────────────────────
         cols = [
             'Reference','Code EAN','Custom Code','Description',
             'Origin','Quantity','Unit Price','Total Price','Invoice Number'
