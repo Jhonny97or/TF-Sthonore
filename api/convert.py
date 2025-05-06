@@ -42,7 +42,8 @@ def convert():
         if not files:
             return 'No file(s) uploaded', 400
 
-        rows = []
+        rows = []                       # salida final
+        pending = []                    # filas sin origen aún
 
         for uploaded in files:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
@@ -53,23 +54,27 @@ def convert():
 
             inv_base = INV_PAT.search(first).group(1) if INV_PAT.search(first) else ''
             add_plv  = 'FACTURE SANS PAIEMENT' in first.upper()
-            origin   = ''
+            origin   = ''                # valor conocido hasta el momento
 
             with pdfplumber.open(tmp.name) as pdf:
                 for page in pdf.pages:
-                    # ── 1) PRE-ESCANEO DE LA PÁGINA ─────────────────────
                     txt = page.extract_text() or ''
 
+                    # ─── Pre-escaneo de la página ──────────────────
                     if (m_inv := INV_PAT.search(txt)):
                         inv_base = m_inv.group(1)
                         add_plv  = 'FACTURE SANS PAIEMENT' in txt.upper()
 
                     if (m_orig := ORIG_PAT.search(txt)):
                         val = m_orig.group(1).strip()
-                        if val:          # solo si trae algo
+                        if val:
                             origin = val
+                            # Completar filas pendientes con este origen
+                            for r in pending:
+                                r['Origin'] = origin
+                            pending.clear()
 
-                    # ── 2) EXTRAER FILAS ────────────────────────────────
+                    # ─── Extraer filas ────────────────────────────
                     lines = txt.split('\n')
                     i = 0
                     while i < len(lines):
@@ -79,7 +84,7 @@ def convert():
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]) else ''
                             qty  = int(qty_s.replace('.','').replace(',',''))
-                            rows.append({
+                            row  = {
                                 'Reference': ref,
                                 'Code EAN': ean,
                                 'Custom Code': custom,
@@ -89,7 +94,10 @@ def convert():
                                 'Unit Price': fnum(unit_s),
                                 'Total Price': fnum(tot_s),
                                 'Invoice Number': inv_base + ('PLV' if add_plv else '')
-                            })
+                            }
+                            rows.append(row)
+                            if not origin:
+                                pending.append(row)
                             i += 1
 
                         elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
@@ -97,7 +105,7 @@ def convert():
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
                             qty  = int(qty_s.replace('.','').replace(',',''))
                             unit = fnum(unit_s)
-                            rows.append({
+                            row  = {
                                 'Reference': ref,
                                 'Code EAN': ean,
                                 'Custom Code': '',
@@ -107,15 +115,21 @@ def convert():
                                 'Unit Price': unit,
                                 'Total Price': unit*qty,
                                 'Invoice Number': inv_base + ('PLV' if add_plv else '')
-                            })
+                            }
+                            rows.append(row)
+                            if not origin:
+                                pending.append(row)
                         i += 1
 
             os.unlink(tmp.name)
 
+        # Si llegamos al final y aún quedan pendientes (PDF nunca declaró origen)
+        # los dejamos vacíos; al menos no romperá.
+
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # ── Generar Excel ────────────────────────────────────────────
+        # ─── Generar Excel ───────────────────────────────────────────
         cols = [
             'Reference','Code EAN','Custom Code','Description',
             'Origin','Quantity','Unit Price','Total Price','Invoice Number'
@@ -126,9 +140,12 @@ def convert():
             ws.append([r.get(c,'') for c in cols])
 
         buf = BytesIO(); wb.save(buf); buf.seek(0)
-        return send_file(buf, as_attachment=True,
-                         download_name='extracted_data.xlsx',
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name='extracted_data.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 
     except Exception:
         logging.error(traceback.format_exc())
