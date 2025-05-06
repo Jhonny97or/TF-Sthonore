@@ -9,16 +9,17 @@ logging.getLogger("pdfminer").setLevel(logging.ERROR)
 app = Flask(__name__)
 
 # ─── 1) PATRONES ────────────────────────────────────────────
-# Captura FACTURE/INVOICE con posible PLV y número
+# Captura número de factura y opcionalmente 'PLV' inline
 INV_PAT = re.compile(
-    r'(?:FACTURE|INVOICE)'                   # palabra clave
-    r'(?:\s+(SANS\s+PAIEMENT|WITHOUT\s+PAYMENT))?'  # grupo opcional PLV
-    r'[^\d]{0,800}?'                         # hasta 800 chars no dígito
-    r'(\d{6,})',                            # captura nº de invoice
+    r'(?:FACTURE|INVOICE)'                  # palabra clave
+    r'(?:\s+(SANS\s+PAIEMENT|WITHOUT\s+PAYMENT))?'  # sufijo PLV inline opcional
+    r'[^
+\d]{0,800}? '                      # hasta 800 chars no dígito ni newline
+    r'(\d{6,})',                           # captura número
     re.I | re.S
 )
-# Patrón para detectar PLV si no aparece junto al invoice
-PLV_INLINE = re.compile(r'(SANS\s+PAIEMENT|WITHOUT\s+PAYMENT)', re.I)
+# Patrón para detectar texto PLV en página
+PLV_PAT = re.compile(r'(?:FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT)', re.I)
 
 # Patrones de filas
 ROW_FACT = re.compile(
@@ -36,11 +37,12 @@ ROW_PROF = re.compile(
     r'([\d.,]+)'                 # Quantity
 )
 
+# Conversión de texto a float
 def fnum(s: str) -> float:
     s = (s or '').strip().replace('.', '').replace(',', '.')
     return float(s) if s else 0.0
 
-# Determina tipo de documento (usado solo al inicio)
+# Detecta tipo de documento
 def doc_kind(text: str) -> str:
     up = text.upper()
     if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up):
@@ -59,67 +61,51 @@ def convert():
             return 'No file(s) uploaded', 400
 
         rows = []
+        current_org = ''
+        current_inv = ''
+        add_plv = False
 
         for pdf_file in pdfs:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
 
             with pdfplumber.open(tmp.name) as pdf:
-                # Determinamos tipo a partir de primera página
-                first_text = pdf.pages[0].extract_text() or ''
-                kind = doc_kind(first_text)
+                kind = doc_kind(pdf.pages[0].extract_text() or '')
 
-                # Estado por PDF
-                current_inv = ''
-                add_plv = False
-                current_org = ''
-                pending_rows = []
-
-                # Recorremos todo el PDF línea a línea
                 for page in pdf.pages:
                     text = page.extract_text() or ''
                     lines = text.split('\n')
 
-                    for idx, raw in enumerate(lines):
-                        line = raw.strip()
+                    # 1) Detectar invoice y PLV a nivel de página
+                    m = INV_PAT.search(text)
+                    if m:
+                        current_inv = m.group(2)
+                        # PLV inline o búsqueda general
+                        add_plv = bool(m.group(1)) or bool(PLV_PAT.search(text))
 
-                        # 1) Detección de invoice + PLV
-                        if m := INV_PAT.search(line):
-                            # grupo2 = número, grupo1 = PLV si existía
-                            new_inv = m.group(2)
-                            new_plv = bool(m.group(1))
-                            # si no venía inline, buscamos cerca
-                            if not new_plv and PLV_INLINE.search(line) is None:
-                                # chequeamos siguiente línea
-                                if idx+1 < len(lines) and PLV_INLINE.search(lines[idx+1]):
-                                    new_plv = True
-                            current_inv = new_inv
-                            add_plv = new_plv
-                            # completamos las filas pendientes
-                            for r in pending_rows:
-                                r['Invoice Number'] = current_inv + ('PLV' if add_plv else '')
-                            pending_rows.clear()
-                            continue
-
-                        # 2) Detección de país
-                        if "PAYS D'ORIGINE" in line.upper():
-                            part = line.split(':',1)
-                            after = part[1].strip() if len(part)>1 else ''
+                    # 2) Actualizar país línea a línea
+                    for idx, ln in enumerate(lines):
+                        if "PAYS D'ORIGINE" in ln.upper():
+                            parts = ln.split(':', 1)
+                            after = parts[1].strip() if len(parts) > 1 else ''
                             if not after and idx+1 < len(lines):
                                 after = lines[idx+1].strip()
                             if after:
                                 current_org = after
-                            continue
 
-                        # 3) Filas FACTURA
-                        if kind=='factura' and (mf:=ROW_FACT.match(line)):
+                    # 3) Extraer filas
+                    for idx, raw in enumerate(lines):
+                        line = raw.strip()
+
+                        # Factura
+                        if kind == 'factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = ''
-                            # posible descripción en la siguiente línea
-                            if idx+1 < len(lines) and not ROW_FACT.match(lines[idx+1]):
-                                desc = lines[idx+1].strip()
-                            invoice_full = current_inv + ('PLV' if add_plv else '') if current_inv else ''
-                            row = {
+                            nxt = lines[idx+1] if idx+1 < len(lines) else ''
+                            if not ROW_FACT.match(nxt):
+                                desc = nxt.strip()
+                            invoice_full = current_inv + ('PLV' if add_plv else '')
+                            rows.append({
                                 'Reference': ref,
                                 'Code EAN': ean,
                                 'Custom Code': custom,
@@ -129,23 +115,15 @@ def convert():
                                 'Unit Price': fnum(unit_s),
                                 'Total Price': fnum(tot_s),
                                 'Invoice Number': invoice_full
-                            }
-                            rows.append(row)
-                            # si aún no detectamos invoice, lo dejamos pendiente
-                            if not current_inv:
-                                pending_rows.append(row)
-                            continue
-
-                        # 4) Filas PROFORMA
-                        if kind=='proforma' and (mp:=ROW_PROF.match(line)):
+                            })
+                        # Proforma
+                        elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
-                            desc = ''
-                            if idx+1 < len(lines):
-                                desc = lines[idx+1].strip()
+                            desc = lines[idx+1].strip() if idx+1 < len(lines) else ''
                             qty = int(qty_s.replace('.', '').replace(',', ''))
                             unit = fnum(unit_s)
-                            invoice_full = current_inv + ('PLV' if add_plv else '') if current_inv else ''
-                            row = {
+                            invoice_full = current_inv + ('PLV' if add_plv else '')
+                            rows.append({
                                 'Reference': ref,
                                 'Code EAN': ean,
                                 'Custom Code': '',
@@ -155,43 +133,45 @@ def convert():
                                 'Unit Price': unit,
                                 'Total Price': unit*qty,
                                 'Invoice Number': invoice_full
-                            }
-                            rows.append(row)
-                            if not current_inv:
-                                pending_rows.append(row)
-
+                            })
             os.unlink(tmp.name)
 
-        # 5) Forward-fill invoice faltantes
-        prev_inv = ''
+        if not rows:
+            return 'Sin registros extraídos', 400
+
+        # 4) Forward-fill Invoice Number
+        last = ''
         for r in rows:
             if r['Invoice Number']:
-                prev_inv = r['Invoice Number']
+                last = r['Invoice Number']
             else:
-                r['Invoice Number'] = prev_inv
+                r['Invoice Number'] = last
 
-        # 6) Completar Origin si es único por factura
+        # 5) Rellenar Origin si es único
         inv_to_org = defaultdict(set)
         for r in rows:
             if r['Origin']:
                 inv_to_org[r['Invoice Number']].add(r['Origin'])
         for r in rows:
-            if not r['Origin'] and len(inv_to_org[r['Invoice Number']])==1:
-                r['Origin']=next(iter(inv_to_org[r['Invoice Number']]))
+            if not r['Origin'] and len(inv_to_org[r['Invoice Number']]) == 1:
+                r['Origin'] = next(iter(inv_to_org[r['Invoice Number']]))
 
-        # 7) Generar Excel
+        # 6) Exportar a Excel
         cols = ['Reference','Code EAN','Custom Code','Description',
                 'Origin','Quantity','Unit Price','Total Price','Invoice Number']
-        wb = Workbook(); ws = wb.active; ws.append(cols)
+        wb = Workbook()
+        ws = wb.active
+        ws.append(cols)
         for r in rows:
-            ws.append([r.get(c,'') for c in cols])
+            ws.append([r.get(c, '') for c in cols])
 
-        buf = BytesIO(); wb.save(buf); buf.seek(0)
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
         return send_file(buf,
                          as_attachment=True,
                          download_name='extracted_data.xlsx',
                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
     except Exception:
         logging.error(traceback.format_exc())
         return f'❌ Error:\n{traceback.format_exc()}', 500
