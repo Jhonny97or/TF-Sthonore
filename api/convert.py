@@ -3,44 +3,28 @@ from io import BytesIO
 from flask import Flask, request, send_file
 import pdfplumber
 from openpyxl import Workbook
-from collections import defaultdict
 
-# ─── Configuración de logging ────────────────────────────────
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
+logging.basicConfig(level=logging.INFO,
+                    format='%(asctime)s %(levelname)s: %(message)s')
+
 app = Flask(__name__)
 
-# ─── 1) REGEX ────────────────────────────────────────────────
-# Nº de factura después de FACTURE/INVOICE (hasta 800 caracteres + saltos de línea)
-INV_PAT = re.compile(r'(?:FACTURE|INVOICE)[^\d]{0,800}?(\d{6,})', re.I | re.S)
+# ─── REGEX ────────────────────────────────────────────────────
+INV_PAT  = re.compile(r'(?:FACTURE|INVOICE)[\s\S]{0,1000}?(\d{6,})', re.I)
+PLV_PAT  = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
 
-# Indicador de factura sin pago (añade sufijo PLV)
-PLV_PAT = re.compile(r'(?:FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT)', re.I)
-
-# Líneas de detalle ‑ FACTURE
 ROW_FACT = re.compile(
-    r'^([A-Z]\w{3,11})\s+'      # Reference
-    r'(\d{12,14})\s+'           # EAN
-    r'(\d{6,9})\s+'             # Custom Code
-    r'(\d[\d.,]*)\s+'          # Qty
-    r'([\d.,]+)\s+'             # Unit Price
-    r'([\d.,]+)\s*$'            # Total Price
-)
-# Líneas de detalle ‑ PROFORMA
+    r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$')
 ROW_PROF = re.compile(
-    r'^([A-Z]\w{3,11})\s+'      # Reference
-    r'(\d{12,14})\s+'           # EAN
-    r'([\d.,]+)\s+'             # Unit Price
-    r'([\d.,]+)\s*$'            # Qty
-)
+    r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)')
 
-# ─── 2) HELPERS ──────────────────────────────────────────────
+ORG_PAT  = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.*)", re.I)
 
+# ─── HELPERS ─────────────────────────────────────────────────
 def fnum(s: str) -> float:
-    """Convierte texto numérico (.,) a float"""
     return float(s.strip().replace('.', '').replace(',', '.')) if s.strip() else 0.0
 
-def doc_kind(text: str) -> str:
-    """Determina si el documento es factura o proforma"""
+def kind(text: str) -> str:
     up = text.upper()
     if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up):
         return 'proforma'
@@ -48,117 +32,120 @@ def doc_kind(text: str) -> str:
         return 'factura'
     raise ValueError('Tipo de documento no reconocido.')
 
-# ─── 3) ENDPOINT ─────────────────────────────────────────────
+# ─── MAIN ENDPOINT ───────────────────────────────────────────
 @app.route('/', methods=['POST'])
 @app.route('/api/convert', methods=['POST'])
-def convert_pdf():
-    logging.info('Inicio de conversión')
+def convert():
     try:
         pdfs = request.files.getlist('file')
         if not pdfs:
             return 'No file(s) uploaded', 400
 
-        rows = []
-        current_inv_global = ''   # por si una página no trae encabezado
-        current_org_global = ''
+        cols  = ['Reference','Code EAN','Custom Code','Description',
+                 'Origin','Quantity','Unit Price','Total Price','Invoice Number']
+        rows  = []
 
-        for idx_file, pdf_file in enumerate(pdfs, 1):
-            logging.info(f'Archivo {idx_file}/{len(pdfs)}: {pdf_file.filename}')
+        for f_idx, pdf_file in enumerate(pdfs, 1):
+            logging.info(f'PDF {f_idx}/{len(pdfs)}  →  {pdf_file.filename}')
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
 
             with pdfplumber.open(tmp.name) as pdf:
-                kind = doc_kind(pdf.pages[0].extract_text() or '')
+                doc_kind = kind(pdf.pages[0].extract_text() or '')
 
-                for idx_page, page in enumerate(pdf.pages, 1):
-                    text = page.extract_text() or ''
-                    lines = text.split('\n')
+                # Current state
+                cur_inv  = ''
+                cur_plv  = False
+                cur_org  = ''
+                pending  = []  # rows without invoice yet
 
-                    # 3.1 Numero de factura y sufijo PLV para ESTA página
-                    m_inv = INV_PAT.search(text)
-                    if m_inv:
-                        current_inv_global = m_inv.group(1)
-                    add_plv_page = bool(PLV_PAT.search(text))
-                    invoice_full_page = current_inv_global + ('PLV' if add_plv_page else '')
+                for p_idx, page in enumerate(pdf.pages, 1):
+                    lines = (page.extract_text() or '').split('\n')
 
-                    # 3.2 Detectar país (último encontrado en la página)
-                    current_org_page = current_org_global  # heredamos
-                    for ln in lines:
-                        if "PAYS D'ORIGINE" in ln.upper():
-                            parts = ln.split(':', 1)
-                            org = parts[1].strip() if len(parts) > 1 else ''
-                            if org:
-                                current_org_page = org
-                    current_org_global = current_org_page  # persiste al siguiente bloque
-
-                    # 3.3 Extraer filas
                     for i, raw in enumerate(lines):
-                        line = raw.strip()
-                        # FACTURA
-                        if kind == 'factura' and (mf := ROW_FACT.match(line)):
+                        ln = raw.strip()
+
+                        # 1️⃣  Header lines
+                        if (m := INV_PAT.search(ln)):
+                            cur_inv = m.group(1)
+                            cur_plv = bool(PLV_PAT.search(ln))
+                            # Maybe PLV is on the same page but not same line
+                            if not cur_plv and any(PLV_PAT.search(x) for x in lines[i:i+3]):
+                                cur_plv = True
+                            for r in pending:
+                                r['Invoice Number'] = cur_inv + ('PLV' if cur_plv else '')
+                            pending.clear()
+                            continue
+
+                        # 2️⃣  Origin line
+                        if (m := ORG_PAT.search(ln)):
+                            found = m.group(1).strip()
+                            if not found and i+1 < len(lines):
+                                found = lines[i+1].strip()
+                            if found:
+                                cur_org = found
+                            continue
+
+                        # 3️⃣  Detail rows
+                        if doc_kind == 'factura' and (mf := ROW_FACT.match(ln)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = ''
-                            if i + 1 < len(lines) and not ROW_FACT.match(lines[i + 1]):
-                                desc = lines[i + 1].strip()
-                            rows.append({
-                                'Reference': ref,
-                                'Code EAN': ean,
-                                'Custom Code': custom,
-                                'Description': desc,
-                                'Origin': current_org_page,
-                                'Quantity': int(qty_s.replace('.', '').replace(',', '')),
-                                'Unit Price': fnum(unit_s),
-                                'Total Price': fnum(tot_s),
-                                'Invoice Number': invoice_full_page
-                            })
-                        # PROFORMA
-                        elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
+                            if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
+                                desc = lines[i+1].strip()
+                            row = dict(zip(cols, [
+                                ref, ean, custom, desc, cur_org,
+                                int(qty_s.replace('.','').replace(',','')),
+                                fnum(unit_s), fnum(tot_s),
+                                cur_inv + ('PLV' if cur_plv else '')
+                            ]))
+                            rows.append(row)
+                            if not cur_inv:
+                                pending.append(row)
+                            continue
+
+                        if doc_kind == 'proforma' and (mp := ROW_PROF.match(ln)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = ''
-                            if i + 1 < len(lines):
-                                desc = lines[i + 1].strip()
-                            qty = int(qty_s.replace('.', '').replace(',', ''))
+                            if i+1 < len(lines):
+                                desc = lines[i+1].strip()
+                            qty  = int(qty_s.replace('.','').replace(',',''))
                             unit = fnum(unit_s)
-                            rows.append({
-                                'Reference': ref,
-                                'Code EAN': ean,
-                                'Custom Code': '',
-                                'Description': desc,
-                                'Origin': current_org_page,
-                                'Quantity': qty,
-                                'Unit Price': unit,
-                                'Total Price': unit * qty,
-                                'Invoice Number': invoice_full_page
-                            })
+                            row  = dict(zip(cols, [
+                                ref, ean, '', desc, cur_org,
+                                qty, unit, unit*qty,
+                                cur_inv + ('PLV' if cur_plv else '')
+                            ]))
+                            rows.append(row)
+                            if not cur_inv:
+                                pending.append(row)
+
             os.unlink(tmp.name)
 
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # 4) Rellenar ORIGIN si está vacío y único por factura
-        inv_to_org = defaultdict(set)
+        # ── Completar ORIGIN cuando sea único por factura ──────
+        from collections import defaultdict
+        inv_orgs = defaultdict(set)
         for r in rows:
             if r['Origin']:
-                inv_to_org[r['Invoice Number']].add(r['Origin'])
+                inv_orgs[r['Invoice Number']].add(r['Origin'])
         for r in rows:
-            if not r['Origin'] and len(inv_to_org[r['Invoice Number']]) == 1:
-                r['Origin'] = next(iter(inv_to_org[r['Invoice Number']]))
+            if not r['Origin'] and len(inv_orgs[r['Invoice Number']]) == 1:
+                r['Origin'] = next(iter(inv_orgs[r['Invoice Number']]))
 
-        # 5) Exportar a Excel
-        cols = ['Reference', 'Code EAN', 'Custom Code', 'Description',
-                'Origin', 'Quantity', 'Unit Price', 'Total Price', 'Invoice Number']
+        # ── Generar Excel ──────────────────────────────────────
         wb = Workbook(); ws = wb.active; ws.append(cols)
         for r in rows:
-            ws.append([r.get(c, '') for c in cols])
+            ws.append([r[c] for c in cols])
 
         buf = BytesIO(); wb.save(buf); buf.seek(0)
-        logging.info('Conversión completada')
-        return send_file(buf,
-                         as_attachment=True,
+        return send_file(buf, as_attachment=True,
                          download_name='extracted_data.xlsx',
                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
     except Exception:
         logging.error(traceback.format_exc())
-        return f'❌ Error:\n{traceback.format_exc()}', 500
+        return '❌ Error interno – revisa logs.', 500
+
 
