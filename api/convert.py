@@ -13,33 +13,25 @@ app = Flask(__name__)
 INV_PAT   = re.compile(r'(?:FACTURE|INVOICE)[\s\S]{0,1000}?(\d{6,})', re.I)
 PLV_PAT   = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
 ORG_PAT   = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.*)", re.I)
-ORDER_PAT = re.compile(r'ORDER\s+NUMBER\s*:?\s*(\d{6,})', re.I)  # proforma
+# Order number can appear in English or French header on proformas
+ORDER_PAT_EN = re.compile(r'ORDER\s+NUMBER\s*/?\s*:?\s*(\d{6,})', re.I)
+ORDER_PAT_FR = re.compile(r'N°\s*DE\s*COMMANDE[^\d]*(\d{6,})', re.I)
 
 ROW_FACT = re.compile(
-    r'^([A-Z]\w{3,11})\s+'      # ref
-    r'(\d{12,14})\s+'           # ean
-    r'(\d{6,9})\s+'             # custom
-    r'(\d[\d.,]*)\s+'          # qty
-    r'([\d.,]+)\s+'             # unit
-    r'([\d.,]+)\s*$'            # total
-)
+    r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$')
 ROW_PROF = re.compile(
-    r'^([A-Z]\w{3,11})\s+'      # ref
-    r'(\d{12,14})\s+'           # ean
-    r'([\d.,]+)\s+'             # unit
-    r'([\d.,]+)\s*$'            # qty
-)
+    r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)\s*$')
 
 COLS = ['Reference','Code EAN','Custom Code','Description',
         'Origin','Quantity','Unit Price','Total Price','Invoice Number']
 
 # ─── HELPERS ──────────────────────────────────────────────
 
-def fnum(s: str) -> float:
+def fnum(s):
     return float(s.strip().replace('.', '').replace(',', '.')) if s.strip() else 0.0
 
-def doc_kind(text: str) -> str:
-    up = text.upper()
+def doc_kind(t):
+    up = t.upper()
     if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up):
         return 'proforma'
     return 'factura'
@@ -66,29 +58,31 @@ def convert():
                     txt   = page.extract_text() or ''
                     lines = txt.split('\n')
 
-                    # ── número de factura u ORDER NUMBER ─────────────
+                    # Invoice / Order number
                     if kind == 'factura':
                         if (m := INV_PAT.search(txt)):
                             inv_global = m.group(1)
                         plv_page = bool(PLV_PAT.search(txt))
                     else:  # proforma
-                        if (o := ORDER_PAT.search(txt)):
-                            inv_global = o.group(1)
-                        plv_page = False  # nunca PLV en proforma
+                        found = None
+                        if (e := ORDER_PAT_EN.search(txt)):
+                            found = e.group(1)
+                        elif (f := ORDER_PAT_FR.search(txt)):
+                            found = f.group(1)
+                        if found:
+                            inv_global = found
+                        plv_page = False
                     invoice_full = inv_global + ('PLV' if plv_page else '')
 
-                    # ── origen (último de la página) ─────────────────
+                    # Origin detection
                     cur_org = org_global
                     for ln in lines:
                         if (mo := ORG_PAT.search(ln)):
-                            val = mo.group(1).strip()
-                            if not val and (idx:=lines.index(ln))+1 < len(lines):
-                                val = lines[idx+1].strip()
-                            if val:
-                                cur_org = val
+                            val = mo.group(1).strip() or cur_org
+                            cur_org = val
                     org_global = cur_org
 
-                    # ── extraer filas ───────────────────────────────
+                    # Extract rows
                     for i, raw in enumerate(lines):
                         ln = raw.strip()
                         if kind == 'factura' and (mf := ROW_FACT.match(ln)):
@@ -111,13 +105,13 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # Rellenar Origin único por factura/orden
+        # Fill unique origin per invoice/order
         inv2org = defaultdict(set)
         for r in rows:
             if r['Origin']:
                 inv2org[r['Invoice Number']].add(r['Origin'])
         for r in rows:
-            if not r['Origin'] and len(inv2org[r['Invoice Number']]) == 1:
+            if not r['Origin'] and len(inv2org[r['Invoice Number']])==1:
                 r['Origin'] = next(iter(inv2org[r['Invoice Number']]))
 
         wb = Workbook(); ws = wb.active; ws.append(COLS)
