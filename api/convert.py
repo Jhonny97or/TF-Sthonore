@@ -24,7 +24,7 @@ def detect_doc_type(txt: str) -> str:
 
 # ─── 3) REGEX ──────────────────────────────────────────────────────
 INV_PAT  = re.compile(r'(?:FACTURE|INVOICE)[^\d]{0,60}(\d{6,})', re.I)
-ORIG_PAT = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
+ORIG_PAT = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.*)", re.I)
 
 ROW_FACT = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$'
@@ -44,7 +44,6 @@ def convert():
 
         rows = []
 
-        # ── Procesar cada PDF ──
         for uploaded in files:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             uploaded.save(tmp.name)
@@ -55,23 +54,29 @@ def convert():
             inv_base = INV_PAT.search(first).group(1) if INV_PAT.search(first) else ''
             add_plv  = 'FACTURE SANS PAIEMENT' in first.upper()
 
-            origin = ''         # se actualizará línea por línea
+            origin = ''
 
             with pdfplumber.open(tmp.name) as pdf:
                 for page in pdf.pages:
                     lines = (page.extract_text() or '').split('\n')
-
                     i = 0
                     while i < len(lines):
                         line = lines[i].strip()
 
-                        # ① ¿Es línea que declara origen?
+                        # ① cabecera de origen
                         if (mo := ORIG_PAT.match(line)):
-                            origin = mo.group(1).strip()
+                            val = mo.group(1).strip()
+                            if val:              # <--  FIX
+                                origin = val
                             i += 1
-                            continue   # siguiente línea
+                            continue
 
-                        # ② ¿Fila de FACTURA?
+                        # ② nueva factura → sólo cambiamos número, no tocamos origin
+                        if (mInv := INV_PAT.search(line)):
+                            inv_base = mInv.group(1)
+                            add_plv  = 'FACTURE SANS PAIEMENT' in line.upper()
+
+                        # ③ fila FACTURA
                         if kind == 'factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]) else ''
@@ -89,7 +94,7 @@ def convert():
                             })
                             i += 1
 
-                        # ③ ¿Fila de PROFORMA?
+                        # ④ fila PROFORMA
                         elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
@@ -103,7 +108,7 @@ def convert():
                                 'Origin': origin,
                                 'Quantity': qty,
                                 'Unit Price': unit,
-                                'Total Price': unit * qty,
+                                'Total Price': unit*qty,
                                 'Invoice Number': inv_base + ('PLV' if add_plv else '')
                             })
                         i += 1
@@ -113,7 +118,7 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # ── Generar Excel ──
+        # ── Excel ──
         cols = [
             'Reference','Code EAN','Custom Code','Description',
             'Origin','Quantity','Unit Price','Total Price','Invoice Number'
@@ -121,17 +126,14 @@ def convert():
         wb = Workbook(); ws = wb.active
         ws.append(cols)
         for r in rows:
-            ws.append([r.get(c, '') for c in cols])
+            ws.append([r.get(c,'') for c in cols])
 
         buf = BytesIO(); wb.save(buf); buf.seek(0)
-        return send_file(
-            buf,
-            as_attachment=True,
-            download_name='extracted_data.xlsx',
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-        )
+        return send_file(buf, as_attachment=True,
+                         download_name='extracted_data.xlsx',
+                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
-    except Exception:
+    except Exception as e:
         logging.error(traceback.format_exc())
         return f'❌ Error:\n{traceback.format_exc()}', 500
 
