@@ -1,4 +1,4 @@
-# ───  Imports  ──────────────────────────────────────────────
+# ─── 1) IMPORTS ───────────────────────────────────────────────
 import logging, re, tempfile, os, traceback
 from io import BytesIO
 from flask import Flask, request, send_file
@@ -9,18 +9,18 @@ from collections import defaultdict
 logging.getLogger("pdfminer").setLevel(logging.ERROR)
 app = Flask(__name__)
 
-# ───  Patrones  ─────────────────────────────────────────────
-INV_PAT  = re.compile(
-    r'(?:FACTURE|INVOICE)[^\d]{0,800}?(\d{6,})',   # ← 800 caracteres y DOTALL
+# ─── 2) PATRONES ──────────────────────────────────────────────
+INV_PAT = re.compile(
+    r'(?:FACTURE|INVOICE)[^\d]{0,800}?(\d{6,})',   # hasta 800 chars, multiline
     re.I | re.S
 )
-PLV_PAT  = re.compile(r'FACTURE\s+SANS\s+PAIEMENT', re.I)   # ← tolera múltiples espacios
+PLV_PAT = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
 
 ROW_FACT = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$'
 )
 ROW_PROF = re.compile(
-    r'([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)'
+    r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)'
 )
 
 def fnum(s):
@@ -34,7 +34,7 @@ def doc_kind(text):
         return 'factura'
     raise ValueError('Tipo de documento no reconocido.')
 
-# ───  Endpoint  ─────────────────────────────────────────────
+# ─── 3) ENDPOINT ──────────────────────────────────────────────
 @app.route('/', methods=['POST'])
 @app.route('/api/convert', methods=['POST'])
 def convert():
@@ -52,40 +52,48 @@ def convert():
             kind = doc_kind(pdfplumber.open(tmp.name).pages[0].extract_text() or '')
 
             current_inv  = ''
-            add_plv      = False
+            add_plv      = False          # sufijo PLV activo
             current_org  = ''
-            pending_rows = []
+            pending_rows = []             # sin nº de factura todavía
 
             with pdfplumber.open(tmp.name) as pdf:
                 for page in pdf.pages:
-                    txt   = page.extract_text() or ''
+                    lines = (page.extract_text() or '').split('\n')
 
-                    # 1️⃣  Actualizar nº factura / modo PLV de la página
-                    if m := INV_PAT.search(txt):
-                        current_inv = m.group(1)
-                        add_plv     = bool(PLV_PAT.search(txt))
-                        # completar filas pendientes
-                        for r in pending_rows:
-                            r['Invoice Number'] = current_inv + ('PLV' if add_plv else '')
-                        pending_rows.clear()
-
-                    lines = txt.split('\n')
                     i = 0
                     while i < len(lines):
                         line = lines[i].strip()
 
-                        # 2️⃣ ¿Cambia el país de origen justo antes?
+                        # 1️⃣  Cambia a FACTURE SANS PAIEMENT
+                        if PLV_PAT.search(line):
+                            add_plv = True
+                            # retro-actualizar filas ya extraídas de ese mismo invoice
+                            for r in rows:
+                                if r['Invoice Number'] == current_inv and not r['Invoice Number'].endswith('PLV'):
+                                    r['Invoice Number'] += 'PLV'
+                            for r in pending_rows:
+                                r['Invoice Number'] = current_inv + 'PLV'
+
+                        # 2️⃣  Nuevo número de factura detectado
+                        if m_inv := INV_PAT.search(line):
+                            current_inv = m_inv.group(1)
+                            add_plv     = False  # reseteamos; se volverá a true si aparece PLV_PAT
+                            for r in pending_rows:
+                                r['Invoice Number'] = current_inv
+                            pending_rows.clear()
+
+                        # 3️⃣  País de origen (línea o línea siguiente)
                         if "PAYS D'ORIGINE" in line.upper():
                             after = line.split(':',1)[1].strip() if ':' in line else ''
                             if not after and i+1 < len(lines):
                                 after = lines[i+1].strip()
-                                i += 1        # saltamos la línea usada
-                            if after:         # siempre actualizamos; sin break
+                                i += 1
+                            if after:
                                 current_org = after
                             i += 1
                             continue
 
-                        # 3️⃣ Rows FACTURA
+                        # 4️⃣  Fila FACTURA
                         if kind == 'factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = ''
@@ -100,7 +108,7 @@ def convert():
                                 'Quantity'      : int(qty_s.replace('.','').replace(',','')),
                                 'Unit Price'    : fnum(unit_s),
                                 'Total Price'   : fnum(tot_s),
-                                'Invoice Number': current_inv + ('PLV' if add_plv else '') if current_inv else ''
+                                'Invoice Number': (current_inv + 'PLV' if add_plv else current_inv) if current_inv else ''
                             }
                             rows.append(row)
                             if not current_inv:
@@ -108,7 +116,7 @@ def convert():
                             i += 1
                             continue
 
-                        # 4️⃣ Rows PROFORMA
+                        # 5️⃣  Fila PROFORMA
                         if kind == 'proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = ''
@@ -125,7 +133,7 @@ def convert():
                                 'Quantity'      : qty,
                                 'Unit Price'    : unit,
                                 'Total Price'   : unit*qty,
-                                'Invoice Number': current_inv + ('PLV' if add_plv else '') if current_inv else ''
+                                'Invoice Number': (current_inv + 'PLV' if add_plv else current_inv) if current_inv else ''
                             }
                             rows.append(row)
                             if not current_inv:
@@ -137,7 +145,7 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # 5️⃣ Rellenar origen si es único por factura
+        # ── 4) Completar Origin vacío cuando sea único por factura ──
         inv_to_org = defaultdict(set)
         for r in rows:
             if r['Origin']:
@@ -149,7 +157,7 @@ def convert():
                 if len(orgs) == 1:
                     r['Origin'] = next(iter(orgs))
 
-        # 6️⃣ Excel
+        # ── 5) Generar Excel ───────────────────────────────────────
         cols = ['Reference','Code EAN','Custom Code','Description',
                 'Origin','Quantity','Unit Price','Total Price','Invoice Number']
         wb = Workbook(); ws = wb.active; ws.append(cols)
@@ -157,10 +165,12 @@ def convert():
             ws.append([r.get(c,'') for c in cols])
 
         buf = BytesIO(); wb.save(buf); buf.seek(0)
-        return send_file(buf,
+        return send_file(
+            buf,
             as_attachment=True,
             download_name='extracted_data.xlsx',
-            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 
     except Exception:
         logging.error(traceback.format_exc())
