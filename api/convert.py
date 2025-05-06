@@ -5,20 +5,21 @@ import pdfplumber
 from openpyxl import Workbook
 from collections import defaultdict
 
-logging.getLogger("pdfminer").setLevel(logging.ERROR)
+# Configuración de logging para ver avances en consola
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s: %(message)s')
 app = Flask(__name__)
 
 # ─── 1) PATRONES ────────────────────────────────────────────
-# Captura número de factura y opcionalmente 'PLV' inline
+# Captura número de factura con posible sufijo PLV inline, permite salto de línea
 INV_PAT = re.compile(
     r'(?:FACTURE|INVOICE)'                  # palabra clave
-    r'(?:\s+(SANS\s+PAIEMENT|WITHOUT\s+PAYMENT))?'  # sufijo PLV inline opcional
+    r'(?:\s+(?:SANS\s+PAIEMENT|WITHOUT\s+PAYMENT))?'  # sufijo PLV inline opcional
     r'[^
-\d]{0,800}? '                      # hasta 800 chars no dígito ni newline
+\d]{0,800}?'+                     # hasta 800 chars no dígito ni newline
     r'(\d{6,})',                           # captura número
     re.I | re.S
 )
-# Patrón para detectar texto PLV en página
+# Patrón para detectar PLV en el texto de página
 PLV_PAT = re.compile(r'(?:FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT)', re.I)
 
 # Patrones de filas
@@ -42,7 +43,7 @@ def fnum(s: str) -> float:
     s = (s or '').strip().replace('.', '').replace(',', '.')
     return float(s) if s else 0.0
 
-# Detecta tipo de documento
+# Determina tipo de documento a partir de un texto
 def doc_kind(text: str) -> str:
     up = text.upper()
     if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up):
@@ -55,88 +56,89 @@ def doc_kind(text: str) -> str:
 @app.route('/', methods=['POST'])
 @app.route('/api/convert', methods=['POST'])
 def convert():
+    logging.info('Inicio de conversión de PDF a Excel')
     try:
         pdfs = request.files.getlist('file')
         if not pdfs:
+            logging.warning('No se recibieron archivos')
             return 'No file(s) uploaded', 400
 
         rows = []
-        current_org = ''
-        current_inv = ''
-        add_plv = False
 
-        for pdf_file in pdfs:
+        for idx_file, pdf_file in enumerate(pdfs, start=1):
+            logging.info(f'Procesando archivo {idx_file}/{len(pdfs)}: {pdf_file.filename}')
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
 
             with pdfplumber.open(tmp.name) as pdf:
                 kind = doc_kind(pdf.pages[0].extract_text() or '')
+                logging.info(f'Tipo de documento: {kind}')
 
-                for page in pdf.pages:
+                # Estado por PDF
+                current_inv = ''
+                add_plv = False
+                current_org = ''
+                pending = []
+
+                for idx_page, page in enumerate(pdf.pages, start=1):
+                    logging.info(f'  Página {idx_page}/{len(pdf.pages)}')
                     text = page.extract_text() or ''
                     lines = text.split('\n')
 
-                    # 1) Detectar invoice y PLV a nivel de página
+                    # 1) Detectar invoice y PLV en la página completa
                     m = INV_PAT.search(text)
                     if m:
-                        current_inv = m.group(2)
-                        # PLV inline o búsqueda general
-                        add_plv = bool(m.group(1)) or bool(PLV_PAT.search(text))
+                        current_inv = m.group(1)
+                        add_plv = bool(PLV_PAT.search(text))
+                        logging.info(f'    Invoice detectado: {current_inv} (PLV={add_plv})')
+                        # Rellenar pendientes
+                        for r in pending:
+                            r['Invoice Number'] = current_inv + ('PLV' if add_plv else '')
+                        pending.clear()
 
-                    # 2) Actualizar país línea a línea
-                    for idx, ln in enumerate(lines):
+                    # 2) Actualizar país por línea
+                    for ln in lines:
                         if "PAYS D'ORIGINE" in ln.upper():
-                            parts = ln.split(':', 1)
-                            after = parts[1].strip() if len(parts) > 1 else ''
-                            if not after and idx+1 < len(lines):
-                                after = lines[idx+1].strip()
-                            if after:
-                                current_org = after
+                            part = ln.split(':',1)
+                            org = part[1].strip() if len(part)>1 else ''
+                            if org:
+                                current_org = org
+                                logging.info(f'    Origin detectado: {current_org}')
 
                     # 3) Extraer filas
-                    for idx, raw in enumerate(lines):
+                    for i, raw in enumerate(lines):
                         line = raw.strip()
-
                         # Factura
-                        if kind == 'factura' and (mf := ROW_FACT.match(line)):
+                        if kind=='factura' and (mf := ROW_FACT.match(line)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
-                            desc = ''
-                            nxt = lines[idx+1] if idx+1 < len(lines) else ''
-                            if not ROW_FACT.match(nxt):
-                                desc = nxt.strip()
+                            desc = lines[i+1].strip() if i+1<len(lines) and not ROW_FACT.match(lines[i+1]) else ''
                             invoice_full = current_inv + ('PLV' if add_plv else '')
-                            rows.append({
-                                'Reference': ref,
-                                'Code EAN': ean,
-                                'Custom Code': custom,
-                                'Description': desc,
-                                'Origin': current_org,
+                            row = {
+                                'Reference': ref,'Code EAN': ean,'Custom Code': custom,
+                                'Description': desc,'Origin': current_org,
                                 'Quantity': int(qty_s.replace('.', '').replace(',', '')),
-                                'Unit Price': fnum(unit_s),
-                                'Total Price': fnum(tot_s),
+                                'Unit Price': fnum(unit_s),'Total Price': fnum(tot_s),
                                 'Invoice Number': invoice_full
-                            })
+                            }
+                            rows.append(row)
+                            if not current_inv:
+                                pending.append(row)
                         # Proforma
-                        elif kind == 'proforma' and (mp := ROW_PROF.match(line)):
+                        elif kind=='proforma' and (mp := ROW_PROF.match(line)):
                             ref, ean, unit_s, qty_s = mp.groups()
-                            desc = lines[idx+1].strip() if idx+1 < len(lines) else ''
-                            qty = int(qty_s.replace('.', '').replace(',', ''))
-                            unit = fnum(unit_s)
-                            invoice_full = current_inv + ('PLV' if add_plv else '')
-                            rows.append({
-                                'Reference': ref,
-                                'Code EAN': ean,
-                                'Custom Code': '',
-                                'Description': desc,
-                                'Origin': current_org,
-                                'Quantity': qty,
-                                'Unit Price': unit,
-                                'Total Price': unit*qty,
-                                'Invoice Number': invoice_full
-                            })
+                            desc = lines[i+1].strip() if i+1<len(lines) else ''
+                            row = {'Reference': ref,'Code EAN': ean,'Custom Code':'',
+                                   'Description': desc,'Origin': current_org,
+                                   'Quantity': int(qty_s.replace('.', '').replace(',', '')),
+                                   'Unit Price': fnum(unit_s),'Total Price': fnum(unit_s)*int(qty_s.replace('.', '').replace(',', '')),
+                                   'Invoice Number': current_inv + ('PLV' if add_plv else '')}
+                            rows.append(row)
+                            if not current_inv:
+                                pending.append(row)
             os.unlink(tmp.name)
 
         if not rows:
+            logging.warning('No se extrajeron filas')
             return 'Sin registros extraídos', 400
 
         # 4) Forward-fill Invoice Number
@@ -147,31 +149,25 @@ def convert():
             else:
                 r['Invoice Number'] = last
 
-        # 5) Rellenar Origin si es único
+        # 5) Completar Origin si único
         inv_to_org = defaultdict(set)
         for r in rows:
             if r['Origin']:
                 inv_to_org[r['Invoice Number']].add(r['Origin'])
         for r in rows:
-            if not r['Origin'] and len(inv_to_org[r['Invoice Number']]) == 1:
-                r['Origin'] = next(iter(inv_to_org[r['Invoice Number']]))
+            if not r['Origin'] and len(inv_to_org[r['Invoice Number']])==1:
+                r['Origin']=next(iter(inv_to_org[r['Invoice Number']]))
 
-        # 6) Exportar a Excel
-        cols = ['Reference','Code EAN','Custom Code','Description',
-                'Origin','Quantity','Unit Price','Total Price','Invoice Number']
-        wb = Workbook()
-        ws = wb.active
-        ws.append(cols)
+        # 6) Generar Excel
+        logging.info('Generando archivo Excel')
+        cols=['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
+        wb=Workbook(); ws=wb.active; ws.append(cols)
         for r in rows:
-            ws.append([r.get(c, '') for c in cols])
+            ws.append([r.get(c,'') for c in cols])
 
-        buf = BytesIO()
-        wb.save(buf)
-        buf.seek(0)
-        return send_file(buf,
-                         as_attachment=True,
-                         download_name='extracted_data.xlsx',
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        buf=BytesIO(); wb.save(buf); buf.seek(0)
+        logging.info('Conversión completada correctamente')
+        return send_file(buf,as_attachment=True,download_name='extracted_data.xlsx',mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
     except Exception:
         logging.error(traceback.format_exc())
         return f'❌ Error:\n{traceback.format_exc()}', 500
