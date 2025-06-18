@@ -1,7 +1,12 @@
-import logging, re, tempfile, os, traceback
+import logging
+import re
+import tempfile
+import os
+import traceback
 from io import BytesIO
-from flask import Flask, request, send_file
+
 import pdfplumber
+from flask import Flask, request, send_file
 from openpyxl import Workbook
 from collections import defaultdict
 
@@ -24,13 +29,15 @@ PROF_NUM_PAT   = re.compile(r'PROFORMA[^\d]{0,20}?(\d{6,})', re.I)
 # Filas
 ROW_FACT       = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$')
-ROW_PROF_DIOR  = re.compile(  # ref | EAN | custom | qty | unit | total
+ROW_PROF_DIOR  = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,10})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$')
-ROW_PROF       = re.compile(  # ref | EAN | unit | qty  (proformas sin custom)
+ROW_PROF       = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)\s*$')
 
-COLS = ['Reference', 'Code EAN', 'Custom Code', 'Description',
-        'Origin', 'Quantity', 'Unit Price', 'Total Price', 'Invoice Number']
+COLS = [
+    'Reference', 'Code EAN', 'Custom Code', 'Description',
+    'Origin', 'Quantity', 'Unit Price', 'Total Price', 'Invoice Number'
+]
 
 # ─── HELPERS ───────────────────────────────────────────────────────
 def fnum(s: str) -> float:
@@ -54,47 +61,49 @@ def convert():
 
         rows = []
         for pdf_file in pdfs:
+            # Guardar temporalmente el PDF
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
 
             with pdfplumber.open(tmp.name) as pdf:
-                kind = doc_kind(pdf.pages[0].extract_text() or '')
-                inv_global = ''
+                # 1) Detectar tipo y número de factura/proforma _solo_ en la primera página
+                first_txt = pdf.pages[0].extract_text() or ''
+                kind = doc_kind(first_txt)
+
+                if kind == 'factura':
+                    m = INV_PAT.search(first_txt)
+                    inv = m.group(1) if m else ''
+                    plv = bool(PLV_PAT.search(first_txt))
+                else:  # proforma
+                    p = PROF_NUM_PAT.search(first_txt)
+                    if p:
+                        inv = p.group(1)
+                    elif (e := ORDER_PAT_EN.search(first_txt)):
+                        inv = e.group(1)
+                    elif (f := ORDER_PAT_FR.search(first_txt)):
+                        inv = f.group(1)
+                    else:
+                        inv = ''
+                    plv = False
+
+                invoice_full = inv + ('PLV' if plv else '')
+
+                # 2) Inicializar origen global por PDF
                 org_global = ''
 
+                # 3) Recorrer todas las páginas sin volver a buscar factura/proforma
                 for page in pdf.pages:
                     txt   = page.extract_text() or ''
                     lines = txt.split('\n')
 
-                    # ── Número de factura / proforma / pedido ───────────────
-                    if kind == 'factura':
-                        if (m := INV_PAT.search(txt)):
-                            inv_global = m.group(1)
-                        plv_page = bool(PLV_PAT.search(txt))
-                    else:  # proforma
-                        found = None
-                        # 1) n.º tras PROFORMA
-                        if (pnum := PROF_NUM_PAT.search(txt)):
-                            found = pnum.group(1)
-                        # 2) pedido (EN/FR)
-                        elif (e := ORDER_PAT_EN.search(txt)):
-                            found = e.group(1)
-                        elif (f := ORDER_PAT_FR.search(txt)):
-                            found = f.group(1)
-                        if found:
-                            inv_global = found
-                        plv_page = False
-                    invoice_full = inv_global + ('PLV' if plv_page else '')
-
-                    # ── País de origen (último detectado en la página) ──────
-                    cur_org = org_global
+                    # Actualizar país de origen si se detecta en la página
                     for ln in lines:
                         if (mo := ORG_PAT.search(ln)):
-                            val = mo.group(1).strip() or cur_org
-                            cur_org = val
-                    org_global = cur_org
+                            val = mo.group(1).strip()
+                            if val:
+                                org_global = val
 
-                    # ── Filas de detalle ────────────────────────────────────
+                    # Extraer filas de detalle
                     for i, raw in enumerate(lines):
                         ln = raw.strip()
 
@@ -104,19 +113,33 @@ def convert():
                             desc = ''
                             if i + 1 < len(lines) and not ROW_FACT.match(lines[i + 1]):
                                 desc = lines[i + 1].strip()
-                            rows.append(dict(zip(
-                                COLS, [ref, ean, custom, desc, cur_org,
-                                       int(qty_s.replace('.', '').replace(',', '')),
-                                       fnum(unit_s), fnum(tot_s), invoice_full])))
+                            rows.append({
+                                'Reference':     ref,
+                                'Code EAN':      ean,
+                                'Custom Code':   custom,
+                                'Description':   desc,
+                                'Origin':        org_global,
+                                'Quantity':      int(qty_s.replace('.', '').replace(',', '')),
+                                'Unit Price':    fnum(unit_s),
+                                'Total Price':   fnum(tot_s),
+                                'Invoice Number': invoice_full
+                            })
 
                         # PROFORMA DIOR (6 columnas)
                         elif kind == 'proforma' and (mpd := ROW_PROF_DIOR.match(ln)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mpd.groups()
                             desc = lines[i + 1].strip() if i + 1 < len(lines) else ''
-                            rows.append(dict(zip(
-                                COLS, [ref, ean, custom, desc, cur_org,
-                                       int(qty_s.replace('.', '').replace(',', '')),
-                                       fnum(unit_s), fnum(tot_s), invoice_full])))
+                            rows.append({
+                                'Reference':     ref,
+                                'Code EAN':      ean,
+                                'Custom Code':   custom,
+                                'Description':   desc,
+                                'Origin':        org_global,
+                                'Quantity':      int(qty_s.replace('.', '').replace(',', '')),
+                                'Unit Price':    fnum(unit_s),
+                                'Total Price':   fnum(tot_s),
+                                'Invoice Number': invoice_full
+                            })
 
                         # PROFORMA genérica (4 columnas)
                         elif kind == 'proforma' and (mp := ROW_PROF.match(ln)):
@@ -124,16 +147,25 @@ def convert():
                             desc = lines[i + 1].strip() if i + 1 < len(lines) else ''
                             qty  = int(qty_s.replace('.', '').replace(',', ''))
                             unit = fnum(unit_s)
-                            rows.append(dict(zip(
-                                COLS, [ref, ean, '', desc, cur_org,
-                                       qty, unit, unit * qty, invoice_full])))
+                            rows.append({
+                                'Reference':     ref,
+                                'Code EAN':      ean,
+                                'Custom Code':   '',
+                                'Description':   desc,
+                                'Origin':        org_global,
+                                'Quantity':      qty,
+                                'Unit Price':    unit,
+                                'Total Price':   unit * qty,
+                                'Invoice Number': invoice_full
+                            })
 
+            # Borrar el archivo temporal
             os.unlink(tmp.name)
 
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # ── Completar origen único por factura/proforma ─────────────────────
+        # Completar origen único por factura/proforma si faltara
         inv2org = defaultdict(set)
         for r in rows:
             if r['Origin']:
@@ -142,16 +174,28 @@ def convert():
             if not r['Origin'] and len(inv2org[r['Invoice Number']]) == 1:
                 r['Origin'] = next(iter(inv2org[r['Invoice Number']]))
 
-        # ── Generar Excel en memoria ─────────────────────────────────────────
-        wb = Workbook(); ws = wb.active; ws.append(COLS)
+        # Generar Excel en memoria
+        wb = Workbook()
+        ws = wb.active
+        ws.append(COLS)
         for r in rows:
             ws.append([r[c] for c in COLS])
-        buf = BytesIO(); wb.save(buf); buf.seek(0)
 
-        return send_file(buf, as_attachment=True,
-                         download_name='extracted_data.xlsx',
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        buf = BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name='extracted_data.xlsx',
+            mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        )
 
     except Exception:
         logging.exception("Error in /convert")
         return f'<pre>{traceback.format_exc()}</pre>', 500
+
+
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0')
