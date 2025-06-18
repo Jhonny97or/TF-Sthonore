@@ -26,7 +26,7 @@ ORDER_PAT_FR   = re.compile(r'N°\s*DE\s*COMMANDE[^\d]*(\d{6,})', re.I)
 # N.º de proforma (p. ej. “PROFORMA 116134874” en Dior)
 PROF_NUM_PAT   = re.compile(r'PROFORMA[^\d]{0,20}?(\d{6,})', re.I)
 
-# Filas
+# Filas de detalle
 ROW_FACT       = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$')
 ROW_PROF_DIOR  = re.compile(
@@ -45,6 +45,7 @@ def fnum(s: str) -> float:
     return float(s.strip().replace('.', '').replace(',', '.')) if s.strip() else 0.0
 
 def doc_kind(text: str) -> str:
+    """Determina si es factura o proforma según el texto"""
     up = text.upper()
     if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up):
         return 'proforma'
@@ -61,12 +62,12 @@ def convert():
 
         rows = []
         for pdf_file in pdfs:
-            # Guardar temporalmente el PDF
+            # 1) Guardar PDF en un tmp file
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
 
             with pdfplumber.open(tmp.name) as pdf:
-                # 1) Detectar tipo y número de factura/proforma _solo_ en la primera página
+                # 2) Extraer texto de la primera página para determinar tipo y número
                 first_txt = pdf.pages[0].extract_text() or ''
                 kind = doc_kind(first_txt)
 
@@ -74,9 +75,9 @@ def convert():
                     m = INV_PAT.search(first_txt)
                     inv = m.group(1) if m else ''
                     plv = bool(PLV_PAT.search(first_txt))
-                else:  # proforma
-                    p = PROF_NUM_PAT.search(first_txt)
-                    if p:
+                else:
+                    # Proforma: primero PROF_NUM_PAT, luego ORDER patterns
+                    if (p := PROF_NUM_PAT.search(first_txt)):
                         inv = p.group(1)
                     elif (e := ORDER_PAT_EN.search(first_txt)):
                         inv = e.group(1)
@@ -88,22 +89,20 @@ def convert():
 
                 invoice_full = inv + ('PLV' if plv else '')
 
-                # 2) Inicializar origen global por PDF
+                # 3) Recorrer todas las páginas para extraer origen y filas
                 org_global = ''
-
-                # 3) Recorrer todas las páginas sin volver a buscar factura/proforma
                 for page in pdf.pages:
                     txt   = page.extract_text() or ''
                     lines = txt.split('\n')
 
-                    # Actualizar país de origen si se detecta en la página
+                    # Actualizar país de origen si lo encontramos
                     for ln in lines:
                         if (mo := ORG_PAT.search(ln)):
                             val = mo.group(1).strip()
                             if val:
                                 org_global = val
 
-                    # Extraer filas de detalle
+                    # Extraer cada línea de detalle
                     for i, raw in enumerate(lines):
                         ln = raw.strip()
 
@@ -111,61 +110,60 @@ def convert():
                         if kind == 'factura' and (mf := ROW_FACT.match(ln)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = ''
-                            if i + 1 < len(lines) and not ROW_FACT.match(lines[i + 1]):
-                                desc = lines[i + 1].strip()
+                            if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
+                                desc = lines[i+1].strip()
                             rows.append({
-                                'Reference':     ref,
-                                'Code EAN':      ean,
-                                'Custom Code':   custom,
-                                'Description':   desc,
-                                'Origin':        org_global,
-                                'Quantity':      int(qty_s.replace('.', '').replace(',', '')),
-                                'Unit Price':    fnum(unit_s),
-                                'Total Price':   fnum(tot_s),
+                                'Reference':      ref,
+                                'Code EAN':       ean,
+                                'Custom Code':    custom,
+                                'Description':    desc,
+                                'Origin':         org_global,
+                                'Quantity':       int(qty_s.replace('.', '').replace(',', '')),
+                                'Unit Price':     fnum(unit_s),
+                                'Total Price':    fnum(tot_s),
                                 'Invoice Number': invoice_full
                             })
 
                         # PROFORMA DIOR (6 columnas)
                         elif kind == 'proforma' and (mpd := ROW_PROF_DIOR.match(ln)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mpd.groups()
-                            desc = lines[i + 1].strip() if i + 1 < len(lines) else ''
+                            desc = lines[i+1].strip() if i+1 < len(lines) else ''
                             rows.append({
-                                'Reference':     ref,
-                                'Code EAN':      ean,
-                                'Custom Code':   custom,
-                                'Description':   desc,
-                                'Origin':        org_global,
-                                'Quantity':      int(qty_s.replace('.', '').replace(',', '')),
-                                'Unit Price':    fnum(unit_s),
-                                'Total Price':   fnum(tot_s),
+                                'Reference':      ref,
+                                'Code EAN':       ean,
+                                'Custom Code':    custom,
+                                'Description':    desc,
+                                'Origin':         org_global,
+                                'Quantity':       int(qty_s.replace('.', '').replace(',', '')),
+                                'Unit Price':     fnum(unit_s),
+                                'Total Price':    fnum(tot_s),
                                 'Invoice Number': invoice_full
                             })
 
                         # PROFORMA genérica (4 columnas)
                         elif kind == 'proforma' and (mp := ROW_PROF.match(ln)):
                             ref, ean, unit_s, qty_s = mp.groups()
-                            desc = lines[i + 1].strip() if i + 1 < len(lines) else ''
+                            desc = lines[i+1].strip() if i+1 < len(lines) else ''
                             qty  = int(qty_s.replace('.', '').replace(',', ''))
                             unit = fnum(unit_s)
                             rows.append({
-                                'Reference':     ref,
-                                'Code EAN':      ean,
-                                'Custom Code':   '',
-                                'Description':   desc,
-                                'Origin':        org_global,
-                                'Quantity':      qty,
-                                'Unit Price':    unit,
-                                'Total Price':   unit * qty,
+                                'Reference':      ref,
+                                'Code EAN':       ean,
+                                'Custom Code':    '',
+                                'Description':    desc,
+                                'Origin':         org_global,
+                                'Quantity':       qty,
+                                'Unit Price':     unit,
+                                'Total Price':    unit * qty,
                                 'Invoice Number': invoice_full
                             })
 
-            # Borrar el archivo temporal
             os.unlink(tmp.name)
 
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # Completar origen único por factura/proforma si faltara
+        # Rellenar origen si falta y solo hay uno por invoice
         inv2org = defaultdict(set)
         for r in rows:
             if r['Origin']:
