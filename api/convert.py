@@ -22,30 +22,29 @@ ORDER_PAT_FR = re.compile(r'N°\s*DE\s*COMMANDE\D*(\d{6,})', re.I)
 PLV_PAT      = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
 ORG_PAT      = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
 HEADER_PAT   = re.compile(r'^No\.\s+Description\b', re.I)
-SUMMARY_PAT  = re.compile(r'Total before discount', re.I)
+SUMMARY_PAT  = re.compile(r'^\s*Total\s+before\s+discount', re.I)
 
 # Line item patterns
 ROW_FACT     = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
 ROW_PROF_DIOR= re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,10})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
 ROW_PROF     = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)$')
+# Updated ROW_INV2: allow thousands separators in quantity and more flexible whitespace
 ROW_INV2     = re.compile(
-    r'^(\d+)\s+(.+?)\s*(\d{12,14})\s+([A-Z]{2})\s+([\d.]+\.[\d.]+\.[\d.]+)\s+(\d+)\s+([^\s]+)\s+([\d.,]+)\s+([\-\d.,]+)\s+([\d.,]+)$'
+    r'^(\d+)\s+(.+?)\s+(\d{12,14})\s+([A-Z]{2})\s+([\d.]+\.[\d.]+\.[\d.]+)\s+([\d.,]+)\s+[^\d]*?([\d.,]+)\s+[\d.,-]*\s+([\d.,]+)$'
 )
+# groups: ref, desc, upc, country, hs, qty, unit, total
 
-COLS = [
-    'Reference','Code EAN','Custom Code','Description',
-    'Origin','Quantity','Unit Price','Total Price','Invoice Number'
-]
+COLS = ['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
+
 
 def fnum(s: str) -> float:
     s = s.strip()
     if not s:
         return 0.0
     if ',' in s and '.' in s:
-        if s.index(',') < s.index('.'):
-            return float(s.replace(',', ''))
-        return float(s.replace('.', '').replace(',', '.'))
+        return float(s.replace(',', '')) if s.index(',') < s.index('.') else float(s.replace('.', '').replace(',', '.'))
     return float(s.replace(',', '').replace(' ', ''))
+
 
 def doc_kind(text: str) -> str:
     up = text.upper()
@@ -63,11 +62,11 @@ def convert():
         for pdf_file in pdfs:
             tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
             pdf_file.save(tmp.name)
+
             with pdfplumber.open(tmp.name) as pdf:
                 all_txt = '\n'.join(page.extract_text() or '' for page in pdf.pages)
                 kind = doc_kind(all_txt)
-               
-                # global invoice no. and origin
+
                 inv_no = ''
                 if kind == 'factura':
                     m = INV_PAT.search(all_txt)
@@ -75,99 +74,64 @@ def convert():
                 else:
                     m = PROF_PAT.search(all_txt) or ORDER_PAT_EN.search(all_txt) or ORDER_PAT_FR.search(all_txt)
                     inv_no = m.group(1) if m else ''
-                plv = bool(PLV_PAT.search(all_txt))
-                invoice_full = inv_no + ('PLV' if plv else '')
+                invoice_full = inv_no + ('PLV' if PLV_PAT.search(all_txt) else '')
 
-                org_global = ''
-                # scan pages
+                origin_global = ''
                 for page in pdf.pages:
-                    text = page.extract_text() or ''
-                    if SUMMARY_PAT.search(text):
-                        break  # stop at summary
-                    lines = text.split('\n')
-                    # update origin if present
+                    txt = page.extract_text() or ''
+                    if SUMMARY_PAT.search(txt):
+                        break
+                    lines = txt.split('\n')
                     for ln in lines:
                         if mo := ORG_PAT.search(ln):
-                            org_global = mo.group(1).strip() or org_global
+                            origin_global = mo.group(1).strip() or origin_global
 
                     capturing = False
-                    i = 0
-                    while i < len(lines):
-                        ln = lines[i].strip()
-                        # detect header start
-                        if HEADER_PAT.match(ln):
+                    for idx, ln in enumerate(lines):
+                        ln_strip = ln.strip()
+                        if not capturing and HEADER_PAT.match(ln_strip):
                             capturing = True
-                            i += 1
                             continue
-                        if not capturing:
-                            i += 1
+                        if not capturing or not ln_strip:
                             continue
-                        # merge multi-line for ROW_INV2
-                        merged = ''
-                        if ln and ln[0].isdigit() and not ROW_INV2.match(ln) and i+1 < len(lines):
-                            cand = ln + ' ' + lines[i+1].strip()
-                            if ROW_INV2.match(cand):
-                                merged, i = cand, i+1
-                        target = merged or ln
 
-                        # parse according to patterns
-                        if kind == 'factura' and (mf := ROW_FACT.match(target)):
-                            ref, ean, custom, qty, up, tp = mf.groups()
-                            desc = ''
-                            if not merged and i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
-                                desc = lines[i+1].strip()
+                        # Attempt full-line match first
+                        if kind == 'factura' and (m2 := ROW_INV2.match(ln_strip)):
+                            ref, desc, upc, ctry, hs, qty_s, unit_s, tot_s = m2.groups()
                             rows.append({
-                                'Reference': ref, 'Code EAN': ean, 'Custom Code': custom,
-                                'Description': desc, 'Origin': org_global,
-                                'Quantity': int(qty.replace('.', '').replace(',', '')),
-                                'Unit Price': fnum(up), 'Total Price': fnum(tp),
+                                'Reference': ref,
+                                'Code EAN': upc,
+                                'Custom Code': hs,
+                                'Description': desc,
+                                'Origin': ctry or origin_global,
+                                'Quantity': int(qty_s.replace(',', '')),
+                                'Unit Price': fnum(unit_s),
+                                'Total Price': fnum(tot_s),
                                 'Invoice Number': invoice_full
                             })
-                        elif kind == 'factura' and (m2 := ROW_INV2.match(target)):
-                            no, desc, upc, ctry, hs, qty, uom, up, posm, tp = m2.groups()
-                            rows.append({
-                                'Reference': no, 'Code EAN': upc, 'Custom Code': hs,
-                                'Description': desc, 'Origin': ctry or org_global,
-                                'Quantity': int(qty.replace(',', '')),
-                                'Unit Price': fnum(up), 'Total Price': fnum(tp),
-                                'Invoice Number': invoice_full
-                            })
-                        elif kind == 'proforma' and (mp := ROW_PROF_DIOR.match(ln)):
-                            ref, ean, custom, qty, up, tp = mp.groups()
-                            desc = lines[i+1].strip() if i+1 < len(lines) else ''
-                            rows.append({
-                                'Reference': ref, 'Code EAN': ean, 'Custom Code': custom,
-                                'Description': desc, 'Origin': org_global,
-                                'Quantity': int(qty.replace('.', '').replace(',', '')),
-                                'Unit Price': fnum(up), 'Total Price': fnum(tp),
-                                'Invoice Number': invoice_full
-                            })
-                        elif kind == 'proforma' and (mp2 := ROW_PROF.match(ln)):
-                            ref, ean, up, qty = mp2.groups()
-                            desc = lines[i+1].strip() if i+1 < len(lines) else ''
-                            qtyv = int(qty.replace('.', '').replace(',', ''))
-                            upv = fnum(up)
-                            rows.append({
-                                'Reference': ref, 'Code EAN': ean, 'Custom Code': '',
-                                'Description': desc, 'Origin': org_global,
-                                'Quantity': qtyv, 'Unit Price': upv,
-                                'Total Price': upv*qtyv,
-                                'Invoice Number': invoice_full
-                            })
-                        i += 1
-            os.unlink(tmp.name)
+                            continue
+                        # If line starts with number but not matched yet, try merge with next line
+                        if kind == 'factura' and ln_strip[0].isdigit() and idx+1 < len(lines):
+                            merged = ln_strip + ' ' + lines[idx+1].strip()
+                            if m2 := ROW_INV2.match(merged):
+                                ref, desc, upc, ctry, hs, qty_s, unit_s, tot_s = m2.groups()
+                                rows.append({
+                                    'Reference': ref,
+                                    'Code EAN': upc,
+                                    'Custom Code': hs,
+                                    'Description': desc,
+                                    'Origin': ctry or origin_global,
+                                    'Quantity': int(qty_s.replace(',', '')),
+                                    'Unit Price': fnum(unit_s),
+                                    'Total Price': fnum(tot_s),
+                                    'Invoice Number': invoice_full
+                                })
+                                continue
+
+                os.unlink(tmp.name)
 
         if not rows:
             return 'Sin registros extraídos', 400
-
-        # fill missing origin
-        inv2org = defaultdict(set)
-        for r in rows:
-            if r['Origin']:
-                inv2org[r['Invoice Number']].add(r['Origin'])
-        for r in rows:
-            if not r['Origin'] and len(inv2org[r['Invoice Number']]) == 1:
-                r['Origin'] = next(iter(inv2org[r['Invoice Number']]))
 
         wb = Workbook()
         ws = wb.active
@@ -178,12 +142,10 @@ def convert():
         buf = BytesIO()
         wb.save(buf)
         buf.seek(0)
-        return send_file(buf,
-                         as_attachment=True,
-                         download_name='extracted_data.xlsx',
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+        return send_file(buf, as_attachment=True, download_name='extracted_data.xlsx', mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
     except Exception:
-        logging.exception("Error in /convert")
+        logging.exception('Error')
         return f'<pre>{traceback.format_exc()}</pre>', 500
 
 if __name__ == '__main__':
