@@ -22,29 +22,29 @@ ORDER_PAT_FR = re.compile(r'N°\s*DE\s*COMMANDE\D*(\d{6,})', re.I)
 PLV_PAT      = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
 ORG_PAT      = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
 
-ROW_FACT     = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
-ROW_PROF_DIOR= re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,10})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
-ROW_PROF     = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)$')
-ROW_INV2     = re.compile(
-    r'^(\d+)\s+(.+?)\s+(\d{12,14})\s+([A-Z]{2})\s+([\d.]+\.[\d.]+\.[\d.]+)\s+(\d+)\s+([^\s]+)\s+([\d.,]+)\s+([\-\d.,]+)\s+([\d.,]+)$'
+ROW_FACT = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
+ROW_PROF_DIOR = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,10})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
+ROW_PROF = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)$')
+# Nuevo formato: permitir descripción sin espacio antes del UPC
+ROW_INV2 = re.compile(
+    r'^(\d+)\s+(.+?)\s*(\d{12,14})\s+([A-Z]{2})\s+([\d.]+\.[\d.]+\.[\d.]+)\s+(\d+)\s+([^\s]+)\s+([\d.,]+)\s+([\-\d.,]+)\s+([\d.,]+)$'
 )
 
-COLS = ['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
-
+COLS = [
+    'Reference','Code EAN','Custom Code','Description',
+    'Origin','Quantity','Unit Price','Total Price','Invoice Number'
+]
 
 def fnum(s: str) -> float:
     s = s.strip()
     if not s:
         return 0.0
-    # detectar formato US (coma miles, punto decimal) vs europeo
+    # detectar estilo US vs europeo
     if ',' in s and '.' in s:
         if s.index(',') < s.index('.'):
-            # US style
             return float(s.replace(',', ''))
         else:
-            # European style
             return float(s.replace('.', '').replace(',', '.'))
-    # solo coma o solo punto -> asumir decimal
     return float(s.replace(',', '').replace(' ', ''))
 
 
@@ -84,7 +84,7 @@ def convert():
 
                 for page in pdf.pages:
                     lines = (page.extract_text() or '').split('\n')
-                    # país de origen
+                    # actualizar país de origen
                     for ln in lines:
                         if mo := ORG_PAT.search(ln):
                             org_global = mo.group(1).strip() or org_global
@@ -92,13 +92,19 @@ def convert():
                     i = 0
                     while i < len(lines):
                         ln = lines[i].strip()
-                        # manejar 2 líneas para ROW_INV2
                         merged = ''
+                        # merge con siguiente línea
                         if kind == 'factura' and ln and ln[0].isdigit() and not ROW_INV2.match(ln) and i+1 < len(lines):
-                            candidate = ln + ' ' + lines[i+1].strip()
-                            if ROW_INV2.match(candidate):
-                                merged = candidate
-                                i += 1  # saltar la siguiente línea
+                            cand = ln + ' ' + lines[i+1].strip()
+                            if ROW_INV2.match(cand):
+                                merged = cand
+                                i += 1
+                        # merge con línea previa (descripción multilínea)
+                        if not merged and kind == 'factura' and ln and ln[0].isdigit() and not ROW_INV2.match(ln) and i > 0:
+                            prev = lines[i-1].strip()
+                            cand = prev + ' ' + ln
+                            if ROW_INV2.match(cand):
+                                merged = cand
 
                         target = merged or ln
                         # factura estándar
@@ -201,4 +207,5 @@ def convert():
 
 if __name__ == '__main__':
     app.run(debug=True, host='0.0.0.0')
+
 
