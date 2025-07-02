@@ -1,9 +1,9 @@
 import logging
-import re
 import tempfile
 import os
 import traceback
 from io import BytesIO
+from typing import List, Dict
 
 import pdfplumber
 from flask import Flask, request, send_file
@@ -13,160 +13,151 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s: %(message)s')
 app = Flask(__name__)
 
-# ─── CONSTANTES Y REGEX ───────────────────────────────────────────
-INV_PAT       = re.compile(r'(?:FACTURE|INVOICE)\D*(\d{6,})', re.I)
-PROF_PAT      = re.compile(r'PROFORMA[\s\S]*?(\d{6,})', re.I)
-ORDER_PAT_EN  = re.compile(r'ORDER\s+NUMBER\D*(\d{6,})', re.I)
-ORDER_PAT_FR  = re.compile(r'N°\s*DE\s*COMMANDE\D*(\d{6,})', re.I)
-PLV_PAT       = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
-ORG_PAT       = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
-HEADER_PAT    = re.compile(r'^No\.\s+Description', re.I)
-SUMMARY_PAT   = re.compile(r'^\s*Total\s+before\s+discount', re.I)
-ROW_START_PAT = re.compile(r'^\d{5,6}[A-Z]?\s')  # sufijo alfanumérico opcional
+# ────────────────── CONFIGURACIÓN DE COLUMNAS (en puntos PDF) ──────────────────
+# Los x‑rangos están medidos sobre un invoice Interparfums tamaño carta (612×792 pt).
+# Si tu PDF viene con márgenes diferentes, ajústalos aquí una sola vez.
 
-ROW_FULL = re.compile(
-    r'^(?P<ref>\d{5,6}[A-Z]?)\s+'         # referencia con letra opcional
-    r'(?P<desc>.+?)\s+'
-    r'(?P<upc>\d{12,14})\s+'
-    r'(?P<ctry>[A-Z]{2})\s+'
-    r'(?P<hs>\d{4}\.\d{2}\.\d{4})\s+'
-    r'(?P<qty>[\d.,]+)\s+'
-    r'(?P<unit>[\d.]+)\s+'
-    r'(?:-|[\d.,]+)\s+'
-    r'(?P<total>[\d.,]+)$'
-)
+COL_BOUNDS = {
+    "ref":   (  0,  65),   # Reference 5‑6 dígitos (puede llevar sufijo A/B)
+    "desc":  ( 70, 330),   # Descripción completa (puede ocupar varias líneas)
+    "upc":   (330, 420),   # UPC / Code EAN 12‑14 dígitos
+    "ctry":  (420, 455),   # Country of origin (2‑3 letras)
+    "hs":    (455, 525),   # HS Code
+    "qty":   (525, 570),   # Quantity
+    "unit":  (570, 615),   # Unit Price
+    "total": (615, 705),   # Line Amount
+}
 
-COLS = [
-    'Reference','Code EAN','Custom Code','Description',
-    'Origin','Quantity','Unit Price','Total Price','Invoice Number'
+COL_ORDER = ["ref", "upc", "hs", "desc", "ctry", "qty", "unit", "total"]
+
+OUTPUT_COLS = [
+    "Reference", "Code EAN", "Custom Code", "Description",
+    "Origin", "Quantity", "Unit Price", "Total Price", "Invoice Number",
 ]
 
-# ─── UTILIDAD ─────────────────────────────────────────────────────
+HEADER_KEYS = {"No.", "Description", "UPC"}
+SUMMARY_SNIPPET = "Total before discount"
 
-def fnum(s: str) -> float:
-    s = s.replace('\u202f', '').strip()
-    if not s:
-        return 0.0
-    if ',' in s and '.' in s:
-        return float(s.replace(',', '')) if s.find(',') < s.find('.') else float(s.replace('.', '').replace(',', '.'))
-    if ',' in s:
-        return float(s.replace('.', '').replace(',', '.'))
-    return float(s.replace(',', ''))
+# ──────────────────────────── AUXILIARES ───────────────────────────────────────
 
-def parse_qty(q: str) -> int:
-    return int(q.replace(',', '').replace('.', ''))
+def clean(s: str) -> str:
+    return s.replace("\u202f", " ").strip()
 
-def doc_kind(text: str) -> str:
-    up = text.upper()
-    return 'proforma' if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up) else 'factura'
 
-# ─── PARSER PRINCIPAL ─────────────────────────────────────────────
+def parse_number(num: str) -> float:
+    """Convierte texto con separadores (coma/punto) en float."""
+    num = num.replace(" ", "").replace("\u202f", "")
+    if num.count(",") == 1 and num.count(".") == 0:
+        num = num.replace(",", ".")           # formato 1,234 → 1.234
+    elif num.count(".") > 1:                    # 1.234.567 → 1234567
+        num = num.replace(".", "")
+    return float(num)
 
-def process_chunk(raw: str, origin: str, invoice_no: str, out_rows: list):
-    clean = ' '.join(raw.split())
-    clean = clean.replace(' Each ', ' ')
-    m = ROW_FULL.match(clean)
-    if not m:
-        logging.debug('Sin match: %s', clean)
-        return
-    gd = m.groupdict()
-    out_rows.append({
-        'Reference': gd['ref'],
-        'Code EAN': gd['upc'],
-        'Custom Code': gd['hs'],
-        'Description': gd['desc'],
-        'Origin': gd['ctry'] or origin,
-        'Quantity': parse_qty(gd['qty']),
-        'Unit Price': fnum(gd['unit']),
-        'Total Price': fnum(gd['total']),
-        'Invoice Number': invoice_no
-    })
 
-# ─── FLASK ENDPOINT ───────────────────────────────────────────────
+def parse_int(num: str) -> int:
+    return int(num.replace(",", "").replace(".", ""))
 
-@app.route('/', methods=['POST'])
-@app.route('/api/convert', methods=['POST'])
+
+# ───────────────────────── EXTRACCIÓN POR COORDENADAS ─────────────────────────
+
+def extract_rows(page) -> List[Dict[str, str]]:
+    """Devuelve lista de dicts con columnas crudas para una página."""
+    rows = []
+    # extrae caracteres y los agrupa por línea (y0 ~ baseline)
+    chars = page.chars
+    # agrupamos por y0 redondeado a 1 décima para robustez
+    lines: Dict[float, List[dict]] = {}
+    for ch in chars:
+        y_key = round(ch["top"], 1)
+        lines.setdefault(y_key, []).append(ch)
+
+    for y, chs in sorted(lines.items()):
+        text_line = "".join(c["text"] for c in sorted(chs, key=lambda c: c["x0"]))
+        if not text_line.strip():
+            continue
+        # saltar cabeceras y resumen
+        if any(h in text_line for h in HEADER_KEYS) or SUMMARY_SNIPPET in text_line:
+            continue
+        # mapear a columnas
+        cols = {k: "" for k in COL_BOUNDS}
+        for cell in sorted(chs, key=lambda c: c["x0"]):
+            x_center = (cell["x0"] + cell["x1"]) / 2
+            for key, (x0, x1) in COL_BOUNDS.items():
+                if x0 <= x_center < x1:
+                    cols[key] += cell["text"]
+                    break
+        # limpiar
+        for k in cols:
+            cols[k] = clean(cols[k])
+        # desc puede extenderse a varias líneas: si esta línea no tiene referencia
+        if not cols["ref"]:
+            # se concatena a la desc de la fila previa
+            if rows:
+                rows[-1]["desc"] += " " + cols["desc"]
+            continue
+        rows.append(cols)
+    return rows
+
+# ──────────────────────────── FLASK ROUTE ─────────────────────────────────────
+
+@app.route("/", methods=["POST"])
+@app.route("/api/convert", methods=["POST"])
 def convert():
     try:
-        pdfs = request.files.getlist('file')
+        pdfs = request.files.getlist("file")
         if not pdfs:
-            return 'No file(s) uploaded', 400
+            return "No file(s) uploaded", 400
 
-        rows = []
+        all_rows = []
         for pdf_file in pdfs:
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix='.pdf')
-            pdf_file.save(tmp.name)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+                pdf_file.save(tmp.name)
+                with pdfplumber.open(tmp.name) as pdf:
+                    # naive invoice number (look first page for SIP...)
+                    first_text = pdf.pages[0].extract_text() or ""
+                    inv_match = re.search(r"SIP(\d{8})", first_text)
+                    invoice_no = inv_match.group(1) if inv_match else ""
 
-            with pdfplumber.open(tmp.name) as pdf:
-                full_txt = '\n'.join(p.extract_text() or '' for p in pdf.pages)
-                kind = doc_kind(full_txt)
+                    for page in pdf.pages:
+                        page_rows = extract_rows(page)
+                        for r in page_rows:
+                            all_rows.append({
+                                "Reference":   r["ref"],
+                                "Code EAN":    r["upc"],
+                                "Custom Code": r["hs"],
+                                "Description": r["desc"],
+                                "Origin":      r["ctry"],
+                                "Quantity":    parse_int(r["qty"] or "0"),
+                                "Unit Price":  parse_number(r["unit"] or "0"),
+                                "Total Price": parse_number(r["total"] or "0"),
+                                "Invoice Number": invoice_no,
+                            })
+                os.unlink(tmp.name)
 
-                inv_no = ''
-                if kind == 'factura':
-                    if m := INV_PAT.search(full_txt):
-                        inv_no = m.group(1)
-                else:
-                    m = PROF_PAT.search(full_txt) or ORDER_PAT_EN.search(full_txt) or ORDER_PAT_FR.search(full_txt)
-                    inv_no = m.group(1) if m else ''
-                invoice_full = inv_no + ('PLV' if PLV_PAT.search(full_txt) else '')
+        if not all_rows:
+            return "Sin registros extraídos", 400
 
-                origin_global = ''
-                stop_all = False
-                for page in pdf.pages:
-                    if stop_all:
-                        break
-                    lines = (page.extract_text() or '').split('\n')
-                    for ln in lines:
-                        if mo := ORG_PAT.search(ln):
-                            origin_global = mo.group(1).strip() or origin_global
-
-                    state = 'idle'
-                    chunk_lines = []
-                    for ln in lines:
-                        ln_strip = ln.strip()
-                        if SUMMARY_PAT.search(ln_strip):
-                            if state == 'building':
-                                process_chunk(' '.join(chunk_lines), origin_global, invoice_full, rows)
-                            stop_all = True
-                            break
-                        if HEADER_PAT.match(ln_strip):
-                            continue
-                        if state == 'idle':
-                            if ROW_START_PAT.match(ln_strip):
-                                state = 'building'
-                                chunk_lines = [ln_strip]
-                        else:
-                            if ROW_START_PAT.match(ln_strip):
-                                process_chunk(' '.join(chunk_lines), origin_global, invoice_full, rows)
-                                chunk_lines = [ln_strip]
-                            else:
-                                chunk_lines.append(ln_strip)
-                    if state == 'building' and chunk_lines:
-                        process_chunk(' '.join(chunk_lines), origin_global, invoice_full, rows)
-            os.unlink(tmp.name)
-
-        if not rows:
-            return 'Sin registros extraídos', 400
-
+        # ─── Generar Excel ─────────────────────────────────────────
         wb = Workbook()
         ws = wb.active
-        ws.append(COLS)
-        for r in rows:
-            ws.append([r[c] for c in COLS])
+        ws.append(OUTPUT_COLS)
+        for r in all_rows:
+            ws.append([r[c] for c in OUTPUT_COLS])
 
         buf = BytesIO()
         wb.save(buf)
         buf.seek(0)
-        return send_file(buf, as_attachment=True,
-                         download_name='extracted_data.xlsx',
-                         mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
-
+        return send_file(buf,
+                         as_attachment=True,
+                         download_name="extracted_data.xlsx",
+                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except Exception:
-        logging.exception('Error en /convert')
-        return f'<pre>{traceback.format_exc()}</pre>', 500
+        logging.exception("Error en /convert")
+        return f"<pre>{traceback.format_exc()}</pre>", 500
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0')
+
+if __name__ == "__main__":
+    app.run(debug=True, host="0.0.0.0")
 
 
 
