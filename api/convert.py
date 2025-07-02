@@ -5,6 +5,7 @@ import traceback
 from io import BytesIO
 from typing import List, Dict
 
+import re
 import pdfplumber
 from flask import Flask, request, send_file
 from openpyxl import Workbook
