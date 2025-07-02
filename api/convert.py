@@ -8,39 +8,48 @@ from io import BytesIO
 import pdfplumber
 from flask import Flask, request, send_file
 from openpyxl import Workbook
-from collections import defaultdict
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s: %(message)s')
 app = Flask(__name__)
 
-# ─── PATTERNS ──────────────────────────────────────────────────────
+# ─── REGEX PATRONES ───────────────────────────────────────────────
 INV_PAT      = re.compile(r'(?:FACTURE|INVOICE)\D*(\d{6,})', re.I)
 PROF_PAT     = re.compile(r'PROFORMA[\s\S]*?(\d{6,})', re.I)
 ORDER_PAT_EN = re.compile(r'ORDER\s+NUMBER\D*(\d{6,})', re.I)
 ORDER_PAT_FR = re.compile(r'N°\s*DE\s*COMMANDE\D*(\d{6,})', re.I)
 PLV_PAT      = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
 ORG_PAT      = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
-HEADER_PAT   = re.compile(r'^No\.\s+Description\b', re.I)
-SUMMARY_PAT  = re.compile(r'Total\s+before\s+discount', re.I)
+HEADER_PAT   = re.compile(r'^No\.\s+Description', re.I)
+SUMMARY_PAT  = re.compile(r'^\s*Total\s+before\s+discount', re.I)
 
-ROW_INV2 = re.compile(
-    r'^(\d+)\s+(.+?)\s+(\d{12,14})\s+([A-Z]{2})\s+([\d.]+\.[\d.]+\.[\d.]+)\s+([\d.,]+)\s+[^\d]*?([\d.,]+)\s+[\d.,\-]*\s+([\d.,]+)$'
+# Nuevo: permite palabra "Each" y campo POSM opcional
+ROW_LINE = re.compile(
+    r'^(?P<ref>\d+)\s+(?P<desc>.+?)\s+(?P<upc>\d{12,14})\s+(?P<ctry>[A-Z]{2})\s+'
+    r'(?P<hs>\d{4}\.\d{2}\.\d{4})\s+(?P<qty>[\d,.]+)\s+Each\s+'
+    r'(?P<unit>[\d.]+)\s+(?:-|[\d.,]+)\s+(?P<total>[\d.,]+)$'
 )
 
-COLS = ['Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number']
+COLS = [
+    'Reference','Code EAN','Custom Code','Description','Origin','Quantity','Unit Price','Total Price','Invoice Number'
+]
+
+# ─── UTIL ─────────────────────────────────────────────────────────
 
 def fnum(s: str) -> float:
-    s = s.strip().replace('\u202f', '')  # remove NBSP if any
+    s = s.replace('\u202f', '').strip()
     if not s:
         return 0.0
     if ',' in s and '.' in s:
-        return float(s.replace(',', '')) if s.index(',') < s.index('.') else float(s.replace('.', '').replace(',', '.'))
-    return float(s.replace(',', '').replace(' ', ''))
+        return float(s.replace(',', '')) if s.find(',') < s.find('.') else float(s.replace('.', '').replace(',', '.'))
+    return float(s.replace(',', '').replace('.', '').replace(' ', ''))
+
 
 def doc_kind(text: str) -> str:
     up = text.upper()
     return 'proforma' if 'PROFORMA' in up or ('ACKNOWLEDGE' in up and 'RECEPTION' in up) else 'factura'
+
+# ─── ENDPOINT ─────────────────────────────────────────────────────
 
 @app.route('/', methods=['POST'])
 @app.route('/api/convert', methods=['POST'])
@@ -56,56 +65,61 @@ def convert():
             pdf_file.save(tmp.name)
 
             with pdfplumber.open(tmp.name) as pdf:
-                text_all = "\n".join(pg.extract_text() or '' for pg in pdf.pages)
-                kind = doc_kind(text_all)
-                inv_no = (INV_PAT if kind=='factura' else PROF_PAT).search(text_all)
-                inv_no = inv_no.group(1) if inv_no else ''
-                invoice_full = inv_no + ('PLV' if PLV_PAT.search(text_all) else '')
+                full_txt = "\n".join(p.extract_text() or '' for p in pdf.pages)
+                kind = doc_kind(full_txt)
+                inv_no = ''
+                if kind == 'factura':
+                    if m := INV_PAT.search(full_txt):
+                        inv_no = m.group(1)
+                else:
+                    m = PROF_PAT.search(full_txt) or ORDER_PAT_EN.search(full_txt) or ORDER_PAT_FR.search(full_txt)
+                    inv_no = m.group(1) if m else ''
+                invoice_full = inv_no + ('PLV' if PLV_PAT.search(full_txt) else '')
 
                 origin_global = ''
-                stop_capture = False
-                for page in pdf.pages:
-                    page_lines = (page.extract_text() or '').split('\n')
-                    # update global origin
-                    for line in page_lines:
-                        if mo := ORG_PAT.search(line):
-                            origin_global = mo.group(1).strip() or origin_global
-                    # iterate lines
+                stop = False
+                for pg in pdf.pages:
+                    txt_lines = (pg.extract_text() or '').split('\n')
+                    # actualizar origen
+                    for t in txt_lines:
+                        if mo := ORG_PAT.search(t):
+                            origin_global = mo.group(1).strip()
                     capturing = False
                     i = 0
-                    while i < len(page_lines) and not stop_capture:
-                        ln = page_lines[i].strip()
-                        if SUMMARY_PAT.search(ln):
-                            stop_capture = True
+                    while i < len(txt_lines) and not stop:
+                        line = txt_lines[i].strip()
+                        if SUMMARY_PAT.search(line):
+                            stop = True
                             break
-                        if not capturing and HEADER_PAT.match(ln):
+                        if not capturing and HEADER_PAT.match(line):
                             capturing = True
                             i += 1
                             continue
                         if not capturing:
                             i += 1
                             continue
-                        # if line empty skip
-                        if not ln:
-                            i += 1; continue
-                        # build up to 3‑line candidate for robustness
-                        candidate = ln
-                        for extra in range(1,3):
-                            if ROW_INV2.match(candidate):
+                        if not line:
+                            i += 1
+                            continue
+
+                        merged = line
+                        # unir hasta 3 líneas mientras no matchea
+                        for extra in range(1,4):
+                            if ROW_LINE.match(merged):
                                 break
-                            if i+extra < len(page_lines):
-                                candidate += ' ' + page_lines[i+extra].strip()
-                        if m := ROW_INV2.match(candidate):
-                            ref, desc, upc, ctry, hs, qty_s, unit_s, tot_s = m.groups()
+                            if i+extra < len(txt_lines):
+                                merged += ' ' + txt_lines[i+extra].strip()
+                        if mrow := ROW_LINE.match(merged):
+                            gd = mrow.groupdict()
                             rows.append({
-                                'Reference': ref,
-                                'Code EAN': upc,
-                                'Custom Code': hs,
-                                'Description': desc,
-                                'Origin': ctry or origin_global,
-                                'Quantity': int(qty_s.replace(',', '').replace('.', '')),
-                                'Unit Price': fnum(unit_s),
-                                'Total Price': fnum(tot_s),
+                                'Reference': gd['ref'],
+                                'Code EAN': gd['upc'],
+                                'Custom Code': gd['hs'],
+                                'Description': gd['desc'],
+                                'Origin': gd['ctry'] or origin_global,
+                                'Quantity': int(gd['qty'].replace(',', '').replace('.', '')),
+                                'Unit Price': fnum(gd['unit']),
+                                'Total Price': fnum(gd['total']),
                                 'Invoice Number': invoice_full
                             })
                         i += 1
@@ -114,6 +128,7 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
+        # ─── Excel ────────────────────────────────────────────────
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
@@ -123,7 +138,9 @@ def convert():
         buf = BytesIO()
         wb.save(buf)
         buf.seek(0)
-        return send_file(buf, as_attachment=True, download_name='extracted_data.xlsx',
+        return send_file(buf,
+                         as_attachment=True,
+                         download_name='extracted_data.xlsx',
                          mimetype='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
 
     except Exception:
