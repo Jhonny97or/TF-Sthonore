@@ -1,4 +1,4 @@
-// vercel.json  ⬅️ sólo amplía tiempo y RAM
+
 {
   "version": 2,
   "functions": {
