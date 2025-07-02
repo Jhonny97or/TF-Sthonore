@@ -14,7 +14,7 @@ logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)s: %(message)s')
 app = Flask(__name__)
 
-# ─── PATRONES ──────────────────────────────────────────────────────
+# ─── PATTERNS ──────────────────────────────────────────────────────
 INV_PAT      = re.compile(r'(?:FACTURE|INVOICE)\D*(\d{6,})', re.I)
 PROF_PAT     = re.compile(r'PROFORMA[\s\S]*?(\d{6,})', re.I)
 ORDER_PAT_EN = re.compile(r'ORDER\s+NUMBER\D*(\d{6,})', re.I)
@@ -22,11 +22,12 @@ ORDER_PAT_FR = re.compile(r'N°\s*DE\s*COMMANDE\D*(\d{6,})', re.I)
 PLV_PAT      = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
 ORG_PAT      = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
 
-ROW_FACT = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
-ROW_PROF_DIOR = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,10})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
-ROW_PROF = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)$')
-# Nuevo formato: permitir descripción sin espacio antes del UPC
-ROW_INV2 = re.compile(
+# Line item patterns for different invoice types
+ROW_FACT     = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
+ROW_PROF_DIOR= re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,10})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)$')
+ROW_PROF     = re.compile(r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)$')
+# New format: No., Description, UPC, Country, HS Code, Quantity, U.of M., Unit Price, POSM/FOC, Line Amount
+ROW_INV2     = re.compile(
     r'^(\d+)\s+(.+?)\s*(\d{12,14})\s+([A-Z]{2})\s+([\d.]+\.[\d.]+\.[\d.]+)\s+(\d+)\s+([^\s]+)\s+([\d.,]+)\s+([\-\d.,]+)\s+([\d.,]+)$'
 )
 
@@ -39,12 +40,11 @@ def fnum(s: str) -> float:
     s = s.strip()
     if not s:
         return 0.0
-    # detectar estilo US vs europeo
+    # Detect US vs EU style
     if ',' in s and '.' in s:
         if s.index(',') < s.index('.'):
             return float(s.replace(',', ''))
-        else:
-            return float(s.replace('.', '').replace(',', '.'))
+        return float(s.replace('.', '').replace(',', '.'))
     return float(s.replace(',', '').replace(' ', ''))
 
 
@@ -82,32 +82,32 @@ def convert():
                 invoice_full = inv_global + ('PLV' if plv_global else '')
                 org_global = ''
 
+                # Iterate all pages fully (no premature break)
                 for page in pdf.pages:
                     lines = (page.extract_text() or '').split('\n')
-                    # actualizar país de origen
+                    # Update origin if found
                     for ln in lines:
                         if mo := ORG_PAT.search(ln):
                             org_global = mo.group(1).strip() or org_global
 
+                    # Parse each line, including merges for multi-line descriptions
                     i = 0
                     while i < len(lines):
                         ln = lines[i].strip()
                         merged = ''
-                        # merge con siguiente línea
+                        # Try merge with next line
                         if kind == 'factura' and ln and ln[0].isdigit() and not ROW_INV2.match(ln) and i+1 < len(lines):
                             cand = ln + ' ' + lines[i+1].strip()
                             if ROW_INV2.match(cand):
-                                merged = cand
-                                i += 1
-                        # merge con línea previa (descripción multilínea)
+                                merged, i = cand, i+1
+                        # Try merge with previous line
                         if not merged and kind == 'factura' and ln and ln[0].isdigit() and not ROW_INV2.match(ln) and i > 0:
-                            prev = lines[i-1].strip()
-                            cand = prev + ' ' + ln
+                            cand = lines[i-1].strip() + ' ' + ln
                             if ROW_INV2.match(cand):
                                 merged = cand
 
                         target = merged or ln
-                        # factura estándar
+                        # Match standard invoice
                         if kind == 'factura' and (mf := ROW_FACT.match(target)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = ''
@@ -124,7 +124,7 @@ def convert():
                                 'Total Price': fnum(tot_s),
                                 'Invoice Number': invoice_full
                             })
-                        # nuevo formato
+                        # Match new format
                         elif kind == 'factura' and (mn2 := ROW_INV2.match(target)):
                             no_s, desc, upc, orig_code, hs_code, qty_s, uom, unit_s, posm_s, tot_s = mn2.groups()
                             rows.append({
@@ -138,7 +138,7 @@ def convert():
                                 'Total Price': fnum(tot_s),
                                 'Invoice Number': invoice_full
                             })
-                        # proforma DIOR
+                        # Match proforma DIOR
                         elif kind == 'proforma' and (mpd := ROW_PROF_DIOR.match(ln)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mpd.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
@@ -153,7 +153,7 @@ def convert():
                                 'Total Price': fnum(tot_s),
                                 'Invoice Number': invoice_full
                             })
-                        # proforma genérica
+                        # Match generic proforma
                         elif kind == 'proforma' and (mp := ROW_PROF.match(ln)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
@@ -171,13 +171,12 @@ def convert():
                                 'Invoice Number': invoice_full
                             })
                         i += 1
-
             os.unlink(tmp.name)
 
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # completar origen
+        # Complete origin if unique per invoice
         inv2org = defaultdict(set)
         for r in rows:
             if r['Origin']:
@@ -186,6 +185,7 @@ def convert():
             if not r['Origin'] and len(inv2org[r['Invoice Number']]) == 1:
                 r['Origin'] = next(iter(inv2org[r['Invoice Number']]))
 
+        # Build Excel
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
