@@ -24,18 +24,25 @@ ORDER_PAT_EN = re.compile(r'ORDER\s+NUMBER\D*(\d{6,})', re.I)
 ORDER_PAT_FR = re.compile(r'N°\s*DE\s*COMMANDE\D*(\d{6,})', re.I)
 # Sufijo “sin pago”
 PLV_PAT      = re.compile(r'FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT', re.I)
-# País de origen
+# País de origen (solo en modelos específicos)
 ORG_PAT      = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
 
-# Líneas de detalle
+# Líneas de detalle para factura estándar
 ROW_FACT     = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$'
 )
+# Líneas de detalle para proforma DIOR
 ROW_PROF_DIOR= re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,10})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$'
 )
+# Líneas de detalle para proforma genérica
 ROW_PROF     = re.compile(
     r'^([A-Z]\w{3,11})\s+(\d{12,14})\s+([\d.,]+)\s+([\d.,]+)\s*$'
+)
+# ─── Nuevo patrón para otro tipo de PDF ────────────────────────────
+# Columnas: No., Description, UPC, Country of Origin, HS Code, Quantity, U.of M., Unit Price, POSM/FOC, Line Amount
+ROW_INV2     = re.compile(
+    r'^(\d+)\s+(.+?)\s+(\d{12,14})\s+([A-Z]{2})\s+([\d.]+\.[\d.]+\.[\d.]+)\s+(\d+)\s+([^\s]+)\s+([\d.,]+)\s+([\d\.-]+)\s+([\d.,]+)$'
 )
 
 COLS = [
@@ -64,19 +71,19 @@ def convert():
             pdf_file.save(tmp.name)
 
             with pdfplumber.open(tmp.name) as pdf:
-                # ─── 1) Prima pasada: combinar todo el texto y extraer un único número ─────────
                 all_txt = "\n".join(page.extract_text() or '' for page in pdf.pages)
                 kind    = doc_kind(all_txt)
 
                 inv_global = ''
                 plv_global = False
 
+                # Extraer número de factura/proforma
                 if kind == 'factura':
                     if m := INV_PAT.search(all_txt):
                         inv_global = m.group(1)
                     if PLV_PAT.search(all_txt):
                         plv_global = True
-                else:  # proforma
+                else:
                     if m := PROF_PAT.search(all_txt):
                         inv_global = m.group(1)
                     elif m := ORDER_PAT_EN.search(all_txt):
@@ -86,23 +93,22 @@ def convert():
 
                 invoice_full = inv_global + ('PLV' if plv_global else '')
 
-                # ─── 2) Segunda pasada: recorrer páginas y extraer filas con ese invoice_full ──
                 org_global = ''
                 for page in pdf.pages:
                     txt   = page.extract_text() or ''
                     lines = txt.split('\n')
 
-                    # actualizar país de origen
+                    # Buscar país de origen
                     for ln in lines:
                         if mo := ORG_PAT.search(ln):
                             val = mo.group(1).strip()
                             if val:
                                 org_global = val
 
-                    # extraer cada línea de detalle
                     for i, raw in enumerate(lines):
                         ln = raw.strip()
 
+                        # Factura estándar
                         if kind == 'factura' and (mf := ROW_FACT.match(ln)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                             desc = ''
@@ -120,6 +126,22 @@ def convert():
                                 'Invoice Number': invoice_full
                             })
 
+                        # Nuevo formato de PDF
+                        elif kind == 'factura' and (mn2 := ROW_INV2.match(ln)):
+                            no_s, desc, upc, orig_code, hs_code, qty_s, uom, unit_s, posm_s, tot_s = mn2.groups()
+                            rows.append({
+                                'Reference':      no_s,
+                                'Code EAN':       upc,
+                                'Custom Code':    hs_code,
+                                'Description':    desc,
+                                'Origin':         orig_code,
+                                'Quantity':       int(qty_s.replace(',', '')),
+                                'Unit Price':     fnum(unit_s),
+                                'Total Price':    fnum(tot_s),
+                                'Invoice Number': invoice_full
+                            })
+
+                        # Proforma DIOR
                         elif kind == 'proforma' and (mpd := ROW_PROF_DIOR.match(ln)):
                             ref, ean, custom, qty_s, unit_s, tot_s = mpd.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
@@ -135,6 +157,7 @@ def convert():
                                 'Invoice Number': invoice_full
                             })
 
+                        # Proforma genérica
                         elif kind == 'proforma' and (mp := ROW_PROF.match(ln)):
                             ref, ean, unit_s, qty_s = mp.groups()
                             desc = lines[i+1].strip() if i+1 < len(lines) else ''
@@ -157,7 +180,7 @@ def convert():
         if not rows:
             return 'Sin registros extraídos', 400
 
-        # completar 'Origin' si sólo hay uno por invoice
+        # Completar 'Origin' si solo hay uno por factura
         inv2org = defaultdict(set)
         for r in rows:
             if r['Origin']:
@@ -166,7 +189,7 @@ def convert():
             if not r['Origin'] and len(inv2org[r['Invoice Number']]) == 1:
                 r['Origin'] = next(iter(inv2org[r['Invoice Number']]))
 
-        # generar Excel en memoria
+        # Generar Excel
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
