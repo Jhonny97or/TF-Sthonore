@@ -1,11 +1,20 @@
 {
   "version": 2,
+
   "builds": [
     { "src": "api/convert.py", "use": "@vercel/python" },
-    { "src": "index.html",      "use": "@vercel/static" }
+    { "src": "index.html",     "use": "@vercel/static" }
   ],
+
   "routes": [
     { "src": "/api/convert", "dest": "/api/convert.py" },
     { "src": "/(.*)",        "dest": "/index.html" }
-  ]
+  ],
+
+  "functions": {
+    "api/**/*.py": {
+      "maxDuration": 60,          // ⬅️ hasta 60 s de ejecución
+      "memory": 512               // ⬅️ opcional (256 → 512 MB)
+    }
+  }
 }
