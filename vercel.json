@@ -1,9 +1,9 @@
 {
   "version": 2,
   "functions": {
-    "api/convert.py": {           // ⬅︎  solo esta línea nueva
-      "memory": 1024,             //    hasta 3008 si hiciera falta
-      "maxDuration": 60           //    segundos (límite máximo)
+    "api/convert.py": {          
+      "memory": 1024,            
+      "maxDuration": 60          
     }
   },
   "builds": [
