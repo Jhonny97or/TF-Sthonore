@@ -1,12 +1,5 @@
-
 {
   "version": 2,
-  "functions": {
-    "api/convert.py": {
-      "memory": 1536,        
-      "maxDuration": 120     
-    }
-  },
   "builds": [
     { "src": "api/convert.py", "use": "@vercel/python" },
     { "src": "index.html",     "use": "@vercel/static" }
