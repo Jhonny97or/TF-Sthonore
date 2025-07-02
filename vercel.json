@@ -3,8 +3,8 @@
   "version": 2,
   "functions": {
     "api/convert.py": {
-      "memory": 1536,        // de 1024 → 1536 MB
-      "maxDuration": 120     // de 60  → 120 s
+      "memory": 1536,        
+      "maxDuration": 120     
     }
   },
   "builds": [
