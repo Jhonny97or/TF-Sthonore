@@ -1,5 +1,12 @@
+// vercel.json  ⬅️ sólo amplía tiempo y RAM
 {
   "version": 2,
+  "functions": {
+    "api/convert.py": {
+      "memory": 1536,        // de 1024 → 1536 MB
+      "maxDuration": 120     // de 60  → 120 s
+    }
+  },
   "builds": [
     { "src": "api/convert.py", "use": "@vercel/python" },
     { "src": "index.html",     "use": "@vercel/static" }
