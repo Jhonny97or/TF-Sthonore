@@ -13,8 +13,8 @@
 
   "functions": {
     "api/**/*.py": {
-      "maxDuration": 60,          // ⬅️ hasta 60 s de ejecución
-      "memory": 512               // ⬅️ opcional (256 → 512 MB)
+      "maxDuration": 60,        
+      "memory": 512             
     }
   }
 }
