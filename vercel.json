@@ -1,5 +1,11 @@
 {
   "version": 2,
+  "functions": {
+    "api/convert.py": {           // ⬅︎  solo esta línea nueva
+      "memory": 1024,             //    hasta 3008 si hiciera falta
+      "maxDuration": 60           //    segundos (límite máximo)
+    }
+  },
   "builds": [
     { "src": "api/convert.py", "use": "@vercel/python" },
     { "src": "index.html",     "use": "@vercel/static" }
