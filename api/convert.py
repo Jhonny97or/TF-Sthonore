@@ -1,3 +1,4 @@
+# app.py  ── listo para Vercel o ejecución local
 import logging
 import os
 import re
@@ -21,7 +22,11 @@ COLS = [
     "Origin", "Quantity", "Unit Price", "Total Price", "Invoice Number"
 ]
 
-# ─────────────────────  EXTRACTOR 1  ──────────────────────────────────────────
+# ───────────────────────  PATRONES PARA CÓDIGOS  ────────────────────────────
+HTS_PAT = re.compile(r"^\d{6,10}$")
+UPC_PAT = re.compile(r"^\d{11,14}$")
+
+# ─────────────────────  EXTRACTOR 1  (facturas clásicas)  ───────────────────
 INV_PAT      = re.compile(r"(?:FACTURE|INVOICE)\D*(\d{6,})", re.I)
 PROF_PAT     = re.compile(r"PROFORMA[\s\S]*?(\d{6,})", re.I)
 ORDER_PAT_EN = re.compile(r"ORDER\s+NUMBER\D*(\d{6,})", re.I)
@@ -136,7 +141,7 @@ def extract_original(pdf_path: str) -> List[dict]:
             r["Origin"] = next(iter(inv2org[r["Invoice Number"]]))
     return rows
 
-# ─────────────────────  EXTRACTOR 2  ──────────────────────────────────────────
+# ─────────────────────  EXTRACTOR 2  (por coordenadas)  ──────────────────────
 COL_BOUNDS = {
     "ref":   (0,   70),
     "desc":  (70, 340),
@@ -148,7 +153,6 @@ COL_BOUNDS = {
     "total": (635,725),
 }
 REF_PAT = re.compile(r"^\d{5,6}[A-Z]?$")
-UPC_PAT = re.compile(r"^\d{12,14}$")
 NUM_PAT = re.compile(r"[0-9]")
 SKIP_SNIPPETS = {
     "No. Description","Total before","Bill To Ship","CIF CHILE",
@@ -189,9 +193,7 @@ def rows_from_page(page) -> List[Dict[str,str]]:
         if not cols["ref"]:
             if rows: rows[-1]["desc"]+=" "+cols["desc"]
             continue
-        if not (REF_PAT.match(cols["ref"]) and UPC_PAT.match(cols["upc"])):
-            continue
-        if not NUM_PAT.search(cols["qty"]):
+        if not REF_PAT.match(cols["ref"]) or not NUM_PAT.search(cols["qty"]):
             continue
         rows.append(cols)
     return rows
@@ -214,7 +216,7 @@ def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
                 })
     return rows
 
-# ─────────────────────  EXTRACTOR 3  ──────────────────────────────────────────
+# ─────────────────────  EXTRACTOR 3  (proveedor nuevo)  ──────────────────────
 pattern_full = re.compile(r"""
     ^\s*
     (?P<ref>\d{5,6}[A-Z]?)\s+
@@ -272,8 +274,7 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                     continue
 
                 # 1) línea completa con HS
-                m=pattern_full.match(ln)
-                if m:
+                if m := pattern_full.match(ln):
                     d=m.groupdict()
                     rows.append({
                         "Reference": d["ref"],
@@ -290,8 +291,7 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                     continue
 
                 # 2) línea completa sin HS
-                m2=pattern_nohs.match(ln)
-                if m2:
+                if m2 := pattern_nohs.match(ln):
                     d=m2.groupdict()
                     rows.append({
                         "Reference": d["ref"],
@@ -308,34 +308,71 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                     continue
 
                 # 3) línea básica (solo números tras desc previa)
-                mb=pattern_basic.match(ln)
-                if mb and pending_desc:
-                    d=mb.groupdict()
-                    rows.append({
-                        "Reference": d["ref"],
-                        "Code EAN": d["upc"],
-                        "Custom Code": d["hs"],
-                        "Description": pending_desc.strip(),
-                        "Origin": d["ctry"],
-                        "Quantity": int(d["qty"].replace(",","")),
-                        "Unit Price": new_fnum(d["unit"]),
-                        "Total Price": new_fnum(d["total"]),
-                        "Invoice Number": inv_number
-                    })
-                    pending_desc=None
+                if mb := pattern_basic.match(ln):
+                    if pending_desc:
+                        d=mb.groupdict()
+                        rows.append({
+                            "Reference": d["ref"],
+                            "Code EAN": d["upc"],
+                            "Custom Code": d["hs"],
+                            "Description": pending_desc.strip(),
+                            "Origin": d["ctry"],
+                            "Quantity": int(d["qty"].replace(",","")),
+                            "Unit Price": new_fnum(d["unit"]),
+                            "Total Price": new_fnum(d["total"]),
+                            "Invoice Number": inv_number
+                        })
+                        pending_desc=None
                     continue
 
-                # 4) acumular parte de descripción
+                # 4) acumular descripción multi-línea
                 if re.search(r"[A-Za-z]", ln_s):
                     skip_pref=("Country of","Customer PO","Order No",
                                "Shipping Terms","Bill To","Finance",
                                "Total","CIF","Ship To")
                     if not any(ln_s.startswith(p) for p in skip_pref):
                         pending_desc=(pending_desc+" "+ln_s) if pending_desc else ln_s
-
     return rows
 
-# ─────────────────────────────  ENDPOINT  ─────────────────────────────────────
+# ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
+def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
+    """Rellena in-place cualquier fila sin HTS o UPC."""
+    # indexamos texto
+    lines=[]
+    with pdfplumber.open(pdf_path) as pdf:
+        for pg in pdf.pages:
+            txt=pg.extract_text(x_tolerance=1.5) or ""
+            lines.extend(txt.split("\n"))
+    lines=[re.sub(r"\s{2,}"," ",ln.strip()) for ln in lines if ln.strip()]
+
+    # mapa Reference → índice
+    ref_idx={}
+    for idx,ln in enumerate(lines):
+        m=re.match(r"^([A-Z0-9]{3,})\s+[A-Z]{3}\s",ln)
+        if m:
+            ref_idx.setdefault(m.group(1), idx)
+
+    for r in rows:
+        if r["Custom Code"] and r["Code EAN"]:
+            continue
+        start=ref_idx.get(r["Reference"])
+        if start is None:
+            continue
+        end=start+1
+        while end<len(lines) and end-start<20:
+            if re.match(r"^[A-Z0-9]{3,}\s+[A-Z]{3}\s",lines[end]):
+                break
+            end+=1
+        snippet=" ".join(lines[start:end])
+        seqs=re.findall(r"\d{6,14}", snippet)
+        hts=[s for s in seqs if HTS_PAT.match(s)]
+        upc=[s for s in seqs if UPC_PAT.match(s)]
+        if hts and not r["Custom Code"]:
+            r["Custom Code"]=hts[0]
+        if upc and not r["Code EAN"]:
+            r["Code EAN"]=upc[0]
+
+# ─────────────────────────────  ENDPOINT  ────────────────────────────────────
 @app.post("/api/convert")
 @app.post("/")
 def convert():
@@ -348,19 +385,24 @@ def convert():
         for pdf in pdfs:
             with tempfile.NamedTemporaryFile(delete=False,suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
-                m=re.search(r"SIP(\d+)",pdf.filename or "")
-                inv_num=m.group(1) if m else ""
+                inv_num=(m.group(1) if (m:=re.search(r"SIP(\d+)", pdf.filename or "")) else "")
 
-                o1=extract_original(tmp.name)
-                o2=extract_slice(tmp.name,inv_num)
-                o3=extract_new_provider(tmp.name,inv_num)
+                # 1-3) extraemos con cada estrategia
+                rows1=extract_original(tmp.name)
+                rows2=extract_slice(tmp.name,inv_num)
+                rows3=extract_new_provider(tmp.name,inv_num)
 
-                combo=o1+o2+o3
+                combo=rows1+rows2+rows3
+                # eliminar duplicados por (Reference, EAN, Invoice)
                 seen=set(); uniq=[]
                 for r in combo:
-                    key=(r["Reference"],r["Code EAN"],r["Invoice Number"])
+                    key=(r["Reference"], r["Code EAN"], r["Invoice Number"])
                     if key not in seen:
                         seen.add(key); uniq.append(r)
+
+                # rellenar cualquier HTS / UPC faltante
+                complete_missing_codes(tmp.name, uniq)
+
                 all_rows.extend(uniq)
             os.unlink(tmp.name)
 
@@ -371,9 +413,12 @@ def convert():
         for r in all_rows:
             ws.append([r[c] for c in COLS])
         buf=BytesIO(); wb.save(buf); buf.seek(0)
-        return send_file(buf,as_attachment=True,
-                         download_name="extracted_data.xlsx",
-                         mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        return send_file(
+            buf,
+            as_attachment=True,
+            download_name="extracted_data.xlsx",
+            mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
     except Exception:
         logging.exception("Error en /convert")
         return f"<pre>{traceback.format_exc()}</pre>",500
