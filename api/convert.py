@@ -16,12 +16,12 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
 app = Flask(__name__)
 
-# Nueva regex para capturar el nombre tras "V/CDE…Nr : <texto>"
+# ── Regex actualizada para capturar cualquier texto entre "V/CDE" y "ORDER Nr"
 ORD_NAME_PAT = re.compile(
-    r"V\/CDE[-Y\/ ]*ORD(?:ER)?\s*Nr\s*[:\-]\s*(.+)", re.I
+    r"V\/CDE[^\n]*?ORDER\s*Nr\s*[:\-]\s*(.+)", re.I
 )
 
-# Añadimos "Order Name" como última columna
+# Columnas del Excel de salida (añadimos "Order Name")
 COLS = [
     "Reference", "Code EAN", "Custom Code", "Description",
     "Origin", "Quantity", "Unit Price", "POSM FOC", "Line Amount",
@@ -159,8 +159,8 @@ COL_BOUNDS: Dict[str, tuple] = {
     "hs":    (465, 535),
     "qty":   (535, 585),
     "unit":  (585, 635),
-    "posm":  (635, 675),   # nueva columna POSM/FOC
-    "total": (675, 755),   # Line Amount
+    "posm":  (635, 675),
+    "total": (675, 755),
 }
 REF_PAT = re.compile(r"^\d{5,6}[A-Z]?$")
 UPC_PAT = re.compile(r"^\d{12,14}$")
@@ -342,23 +342,20 @@ def convert():
         for pdf in pdfs:
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
-                # extraer número de invoice desde el nombre de archivo (si aplica)
                 inv_match = re.search(r"SIP(\d+)", pdf.filename or "")
                 inv_num = inv_match.group(1) if inv_match else ""
 
-                # ── NUEVO: extraer "Order Name" desde el PDF ───────────
+                # ── extraer "Order Name" con la nueva regex ───────────
                 order_name = ""
                 with pdfplumber.open(tmp.name) as pdf_for_name:
                     txt_all = "\n".join(page.extract_text() or "" for page in pdf_for_name.pages)
                     if m := ORD_NAME_PAT.search(txt_all):
                         order_name = m.group(1).strip()
 
-                # extraer filas con cada extractor
                 o1 = extract_original(tmp.name)
                 o2 = extract_slice(tmp.name, inv_num)
                 o3 = extract_new_provider(tmp.name, inv_num)
 
-                # combinar y deduplicar
                 combined = o1 + o2 + o3
                 seen = set()
                 unique = []
@@ -366,7 +363,6 @@ def convert():
                     key = (r["Reference"], r["Code EAN"], r["Invoice Number"])
                     if key not in seen:
                         seen.add(key)
-                        # ── asignar Order Name a cada fila
                         r["Order Name"] = order_name
                         unique.append(r)
 
@@ -376,12 +372,10 @@ def convert():
         if not all_rows:
             return "Sin registros extraídos", 400
 
-        # generar Excel
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
         for r in all_rows:
-            # usar .get para que no falle si alguna fila no tuviera clave
             ws.append([r.get(c, "") for c in COLS])
 
         buf = BytesIO()
