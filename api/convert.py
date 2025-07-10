@@ -16,9 +16,9 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
 app = Flask(__name__)
 
-# Regex para capturar el nombre de orden (V/CDE… ORDER Nr)
+# ── Regex mejorada para capturar "V/CDE… ORD Nr" o "V/CDE… ORDER Nr"
 ORD_NAME_PAT = re.compile(
-    r"V\/CDE[^\n]*?ORDER\s*Nr\s*[:\-]\s*(.+)", re.I
+    r"V\/CDE[^\n]*?ORD(?:ER)?\s*Nr\s*[:\-]\s*(.+)", re.I
 )
 # Regex para capturar el número de entrega (Nr LIV/DEL Nr)
 DELIV_NUM_PAT = re.compile(
@@ -284,7 +284,6 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                 if not ln_s or ln_s.startswith(("No. Description", "Invoice")):
                     continue
 
-                # 1) línea completa con HS
                 m = pattern_full.match(ln)
                 if m:
                     d = m.groupdict()
@@ -303,7 +302,6 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                     pending_desc = None
                     continue
 
-                # 2) línea básica (sin descripción nueva)
                 mb = pattern_basic.match(ln)
                 if mb and pending_desc is not None:
                     d = mb.groupdict()
@@ -322,7 +320,6 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                     pending_desc = None
                     continue
 
-                # 3) acumular parte de descripción
                 if re.search(r"[A-Za-z]", ln_s):
                     skip = (
                         "Country of","Customer PO","Order No","Shipping Terms",
