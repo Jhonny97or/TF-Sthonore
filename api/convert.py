@@ -16,20 +16,16 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
 app = Flask(__name__)
 
-# ── Regex mejorada para capturar "V/CDE… ORD Nr" o "V/CDE… ORDER Nr"
+# Regex mejorada para capturar "V/CDE… ORD Nr" o "V/CDE… ORDER Nr"
 ORD_NAME_PAT = re.compile(
     r"V\/CDE[^\n]*?ORD(?:ER)?\s*Nr\s*[:\-]\s*(.+)", re.I
 )
-# Regex para capturar el número de entrega (Nr LIV/DEL Nr)
-DELIV_NUM_PAT = re.compile(
-    r"Nr\s*LIV\/DEL\s*Nr\s*[:\-]\s*(\S+)", re.I
-)
 
-# Columnas de salida (añadimos "Order Name" y "Delivery Number")
+# Columnas de salida (dejamos sólo "Order Name")
 COLS = [
     "Reference", "Code EAN", "Custom Code", "Description",
     "Origin", "Quantity", "Unit Price", "POSM FOC", "Line Amount",
-    "Invoice Number", "Order Name", "Delivery Number"
+    "Invoice Number", "Order Name"
 ]
 
 # ───────────────────── EXTRACTOR 1 (original) ─────────────────────
@@ -83,7 +79,6 @@ def extract_original(pdf_path: str) -> List[dict]:
 
         for page in pdf.pages:
             lines = (page.extract_text() or "").split("\n")
-            # país de origen
             for ln in lines:
                 if mo := ORG_PAT.search(ln):
                     val = mo.group(1).strip()
@@ -144,7 +139,6 @@ def extract_original(pdf_path: str) -> List[dict]:
                         "Invoice Number": invoice_full,
                     })
 
-    # completar Origin si hay uno solo por invoice
     inv2org = defaultdict(set)
     for r in rows:
         if r["Origin"]:
@@ -346,14 +340,12 @@ def convert():
                 inv_match = re.search(r"SIP(\d+)", pdf.filename or "")
                 inv_num = inv_match.group(1) if inv_match else ""
 
-                # extraer Order Name y Delivery Number
-                order_name, delivery_num = "", ""
+                # extraer sólo Order Name
+                order_name = ""
                 with pdfplumber.open(tmp.name) as pdf_for_name:
                     txt_all = "\n".join(page.extract_text() or "" for page in pdf_for_name.pages)
                     if m := ORD_NAME_PAT.search(txt_all):
                         order_name = m.group(1).strip()
-                    if m2 := DELIV_NUM_PAT.search(txt_all):
-                        delivery_num = m2.group(1).strip()
 
                 o1 = extract_original(tmp.name)
                 o2 = extract_slice(tmp.name, inv_num)
@@ -367,7 +359,6 @@ def convert():
                     if key not in seen:
                         seen.add(key)
                         r["Order Name"] = order_name
-                        r["Delivery Number"] = delivery_num
                         unique.append(r)
 
                 all_rows.extend(unique)
@@ -376,7 +367,6 @@ def convert():
         if not all_rows:
             return "Sin registros extraídos", 400
 
-        # generar Excel
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
