@@ -16,16 +16,20 @@ logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
 app = Flask(__name__)
 
-# ── Regex actualizada para capturar cualquier texto entre "V/CDE" y "ORDER Nr"
+# Regex para capturar el nombre de orden (V/CDE… ORDER Nr)
 ORD_NAME_PAT = re.compile(
     r"V\/CDE[^\n]*?ORDER\s*Nr\s*[:\-]\s*(.+)", re.I
 )
+# Regex para capturar el número de entrega (Nr LIV/DEL Nr)
+DELIV_NUM_PAT = re.compile(
+    r"Nr\s*LIV\/DEL\s*Nr\s*[:\-]\s*(\S+)", re.I
+)
 
-# Columnas del Excel de salida (añadimos "Order Name")
+# Columnas de salida (añadimos "Order Name" y "Delivery Number")
 COLS = [
     "Reference", "Code EAN", "Custom Code", "Description",
     "Origin", "Quantity", "Unit Price", "POSM FOC", "Line Amount",
-    "Invoice Number", "Order Name"
+    "Invoice Number", "Order Name", "Delivery Number"
 ]
 
 # ───────────────────── EXTRACTOR 1 (original) ─────────────────────
@@ -345,12 +349,14 @@ def convert():
                 inv_match = re.search(r"SIP(\d+)", pdf.filename or "")
                 inv_num = inv_match.group(1) if inv_match else ""
 
-                # ── extraer "Order Name" con la nueva regex ───────────
-                order_name = ""
+                # extraer Order Name y Delivery Number
+                order_name, delivery_num = "", ""
                 with pdfplumber.open(tmp.name) as pdf_for_name:
                     txt_all = "\n".join(page.extract_text() or "" for page in pdf_for_name.pages)
                     if m := ORD_NAME_PAT.search(txt_all):
                         order_name = m.group(1).strip()
+                    if m2 := DELIV_NUM_PAT.search(txt_all):
+                        delivery_num = m2.group(1).strip()
 
                 o1 = extract_original(tmp.name)
                 o2 = extract_slice(tmp.name, inv_num)
@@ -364,6 +370,7 @@ def convert():
                     if key not in seen:
                         seen.add(key)
                         r["Order Name"] = order_name
+                        r["Delivery Number"] = delivery_num
                         unique.append(r)
 
                 all_rows.extend(unique)
@@ -372,6 +379,7 @@ def convert():
         if not all_rows:
             return "Sin registros extraídos", 400
 
+        # generar Excel
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
@@ -392,4 +400,5 @@ def convert():
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
+
 
