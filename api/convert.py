@@ -11,7 +11,7 @@ import pdfplumber
 from flask import Flask, request, send_file
 from openpyxl import Workbook
 
-# ────────────────────────────── CONFIG GLOBAL ─────────────────────────────
+# ──────────────────────────────  CONFIG GLOBAL  ─────────────────────────────
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
 app = Flask(__name__)
@@ -21,7 +21,7 @@ COLS = [
     "Origin", "Quantity", "Unit Price", "POSM FOC", "Line Amount", "Invoice Number"
 ]
 
-# ───────────────────── EXTRACTOR 1 (original) ───────────────────────────────
+# ─────────────────────  EXTRACTOR 1  (original)  ─────────────────────────────
 INV_PAT      = re.compile(r"(?:FACTURE|INVOICE)\D*(\d{6,})", re.I)
 PROF_PAT     = re.compile(r"PROFORMA[\s\S]*?(\d{6,})", re.I)
 ORDER_PAT_EN = re.compile(r"ORDER\s+NUMBER\D*(\d{6,})", re.I)
@@ -47,7 +47,7 @@ def doc_kind(text: str) -> str:
     return "proforma" if "PROFORMA" in up or ("ACKNOWLEDGE" in up and "RECEPTION" in up) else "factura"
 
 def extract_original(pdf_path: str) -> List[dict]:
-    rows: List[dict] = []
+    rows = []
     with pdfplumber.open(pdf_path) as pdf:
         all_txt = "\n".join(page.extract_text() or "" for page in pdf.pages)
         kind = doc_kind(all_txt)
@@ -83,9 +83,7 @@ def extract_original(pdf_path: str) -> List[dict]:
                 ln = raw.strip()
                 if kind == "factura" and (mf := ROW_FACT.match(ln)):
                     ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
-                    desc = ""
-                    if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
-                        desc = lines[i+1].strip()
+                    desc = lines[i+1].strip() if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]) else ""
                     rows.append({
                         "Reference":     ref,
                         "Code EAN":      ean,
@@ -132,7 +130,7 @@ def extract_original(pdf_path: str) -> List[dict]:
                     })
 
     # completar Origin si hay uno solo por invoice
-    inv2org: Dict[str, set] = defaultdict(set)
+    inv2org = defaultdict(set)
     for r in rows:
         if r["Origin"]:
             inv2org[r["Invoice Number"]].add(r["Origin"])
@@ -141,24 +139,23 @@ def extract_original(pdf_path: str) -> List[dict]:
             r["Origin"] = next(iter(inv2org[r["Invoice Number"]]))
     return rows
 
-# ───────────────────── EXTRACTOR 2 (slice) ────────────────────────────────
+# ─────────────────────  EXTRACTOR 2  (slice)  ──────────────────────────────
 COL_BOUNDS: Dict[str, tuple] = {
-    "ref":   (0,   70),
-    "desc":  (70, 340),
-    "upc":   (340,430),
-    "ctry":  (430,465),
-    "hs":    (465,535),
-    "qty":   (535,585),
-    "unit":  (585,635),
-    "posm":  (635,675),   # POSM/FOC
-    "total": (675,755),   # Line Amount
+    "ref":   (  0,  70),
+    "desc":  ( 70, 340),
+    "upc":   (340, 430),
+    "ctry":  (430, 465),
+    "hs":    (465, 535),
+    "qty":   (535, 585),
+    "unit":  (585, 635),
+    "total": (635, 725),
 }
 REF_PAT = re.compile(r"^\d{5,6}[A-Z]?$")
 UPC_PAT = re.compile(r"^\d{12,14}$")
 NUM_PAT = re.compile(r"[0-9]")
 SKIP_SNIPPETS = {
-    "No. Description","Total before","Bill To Ship","CIF CHILE",
-    "Invoice","Ship From","Ship To","VAT/Tax","Shipping Te"
+    "No. Description", "Total before", "Bill To Ship", "CIF CHILE",
+    "Invoice", "Ship From", "Ship To", "VAT/Tax", "Shipping Te"
 }
 
 def clean(txt: str) -> str:
@@ -208,11 +205,11 @@ def rows_from_page(page) -> List[Dict[str, str]]:
     return rows
 
 def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
-    rows: List[dict] = []
+    rows = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             for r in rows_from_page(page):
-                rows.append({
+                rows.append({                       
                     "Reference":     r["ref"],
                     "Code EAN":      r["upc"],
                     "Custom Code":   r["hs"],
@@ -220,13 +217,13 @@ def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
                     "Origin":        r["ctry"],
                     "Quantity":      to_int2(r["qty"]),
                     "Unit Price":    to_float2(r["unit"]),
-                    "POSM FOC":      to_float2(r["posm"]),
+                    "POSM FOC":      "",
                     "Line Amount":   to_float2(r["total"]),
                     "Invoice Number": inv_number,
                 })
     return rows
 
-# ───────────────────── EXTRACTOR 3 (nuevo proveedor) ─────────────────────────
+# ─────────────────────  EXTRACTOR 3  (nuevo proveedor)  ──────────────────────
 pattern_full = re.compile(r"""
     ^\s*
     (?P<ref>\d{5,6}[A-Z]?)\s+
@@ -234,6 +231,19 @@ pattern_full = re.compile(r"""
     (?P<upc>\d{12,14})\s+
     (?P<ctry>[A-Z]{2})\s+
     (?P<hs>\d{4}\.\d{2}\.\d{4})\s+
+    (?P<qty>[\d,]+)\s+
+    Each\s+
+    (?P<unit>[\d.,]+)\s+
+    (?:-|(?P<posm>[\d.,]+))\s+
+    (?P<total>[\d.,]+)
+    """, re.VERBOSE)
+
+pattern_nohs = re.compile(r"""
+    ^\s*
+    (?P<ref>\d{5,6}[A-Z]?)\s+
+    (?P<desc>.+?)\s+
+    (?P<upc>\d{12,14})\s+
+    (?P<ctry>[A-Z]{2})\s+
     (?P<qty>[\d,]+)\s+
     Each\s+
     (?P<unit>[\d.,]+)\s+
@@ -259,20 +269,20 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
         txt = s.replace(",", "")
         return float(txt) if txt else 0.0
 
-    rows: List[dict] = []
+    rows = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             txt = page.extract_text() or ""
             if "No. Description" not in txt:
                 continue
 
-            pending_desc: str = ""
+            pending_desc = None
             for ln in txt.split("\n"):
                 ln_s = ln.strip()
                 if not ln_s or ln_s.startswith(("No. Description", "Invoice")):
                     continue
 
-                # línea completa
+                # 1) línea completa con HS
                 m = pattern_full.match(ln)
                 if m:
                     d = m.groupdict()
@@ -288,10 +298,29 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                         "Line Amount":   new_fnum(d["total"]),
                         "Invoice Number": inv_number,
                     })
-                    pending_desc = ""
+                    pending_desc = None
                     continue
 
-                # línea básica
+                # 2) línea sin HS
+                m2 = pattern_nohs.match(ln)
+                if m2:
+                    d = m2.groupdict()
+                    rows.append({
+                        "Reference":     d["ref"],
+                        "Code EAN":      d["upc"],
+                        "Custom Code":   "",
+                        "Description":   d["desc"].strip(),
+                        "Origin":        d["ctry"],
+                        "Quantity":      int(d["qty"].replace(",", "")),
+                        "Unit Price":    new_fnum(d["unit"]),
+                        "POSM FOC":      new_fnum(d.get("posm", "")),
+                        "Line Amount":   new_fnum(d["total"]),
+                        "Invoice Number": inv_number,
+                    })
+                    pending_desc = None
+                    continue
+
+                # 3) línea básica tras desc partida
                 mb = pattern_basic.match(ln)
                 if mb and pending_desc:
                     d = mb.groupdict()
@@ -307,21 +336,21 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                         "Line Amount":   new_fnum(d["total"]),
                         "Invoice Number": inv_number,
                     })
-                    pending_desc = ""
+                    pending_desc = None
                     continue
 
-                # acumular descripción
+                # 4) acumular parte de descripción
                 if re.search(r"[A-Za-z]", ln_s):
                     skip = (
-                        "Country of","Customer PO","Order No","Shipping Terms",
-                        "Bill To","Finance","Total","CIF","Ship To"
+                        "Country of", "Customer PO", "Order No", "Shipping Terms",
+                        "Bill To", "Finance", "Total", "CIF", "Ship To"
                     )
                     if not any(ln_s.startswith(p) for p in skip):
-                        pending_desc = f"{pending_desc} {ln_s}".strip()
+                        pending_desc = (pending_desc + " " + ln_s).strip() if pending_desc else ln_s
 
     return rows
 
-# ───────────────────────────── ENDPOINT ───────────────────────────────────────
+# ─────────────────────────────  ENDPOINT  ─────────────────────────────────────
 @app.post("/api/convert")
 @app.post("/")
 def convert():
@@ -350,7 +379,6 @@ def convert():
                         seen.add(key)
                         unique.append(r)
                 all_rows.extend(unique)
-
             os.unlink(tmp.name)
 
         if not all_rows:
