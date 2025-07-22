@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TF‑StHonoré – Conversor PDF → Excel
+TF‑StHonoré – Conversor PDF → Excel (v2025‑07)
 · extract_original          (facturas & proformas clásicas)
 · extract_slice             (layout por columnas fijas)
 · extract_new_provider      (proveedor Dior “No. Description … Each”)
@@ -27,6 +27,7 @@ COLS = [
     "Quantity", "GrossUnitPrice", "NetUnitPrice", "POSM FOC",
     "GrossTotalExclVAT", "TotalAI", "Invoice Number", "Order Name", "gencod"
 ]
+
 ORD_NAME_PAT = re.compile(r"V\/CDE[^\n]*?ORD(?:ER)?\s*Nr\s*[:\-]\s*(.+)", re.I)
 FC_PAT       = re.compile(r"FC-\d{3}-\d{2}-\d{5}")
 
@@ -43,8 +44,9 @@ def to_float2(txt: str) -> float:
     return float(t or 0)
 
 def to_int2(txt: str) -> int:
-    txt = (txt or "").replace(",", "").replace(".", "").replace("\u202f", "").replace(" ", "")
-    return int(txt or 0)
+    # Elimina TODO lo que no sea dígito (espacios, NBSP, puntos, comas, etc.)
+    digits = re.sub(r"[^\d]", "", txt or "")
+    return int(digits) if digits else 0
 
 # ───────────────────── EXTRACTOR 1 (original) ─────────────────────
 INV_PAT      = re.compile(r"(?:FACTURE|INVOICE)\D*(\d{6,})", re.I)
@@ -130,7 +132,6 @@ def extract_original(pdf_path: str) -> List[dict]:
                         "TotalAI": unit*qty, "Invoice Number": invoice_full
                     })
 
-    # Propaga país de origen si aparece en solo una fila por factura
     inv2org = defaultdict(set)
     for r in rows:
         if r["Origin"]:
@@ -307,11 +308,11 @@ def convert():
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
 
-                # — extrae todo el texto una sola vez
+                # Extrae texto completo
                 with pdfplumber.open(tmp.name) as p:
                     full_txt="\n".join(pg.extract_text() or "" for pg in p.pages)
 
-                # Invoice Number: primero FC‑xxx‑xx‑xxxxx
+                # Invoice Number
                 if m:=FC_PAT.search(full_txt):
                     inv_num=m.group(0)
                 elif m:=re.search(r"SIP(\d+)", pdf.filename or ""):
@@ -319,12 +320,11 @@ def convert():
                 else:
                     inv_num=""
 
-                # Order Name (opcional)
+                # Order Name
                 order_name=""
                 if m:=ORD_NAME_PAT.search(full_txt):
                     order_name=m.group(1).strip()
 
-                # extractores
                 o1=extract_original(tmp.name)
                 o2=extract_slice(tmp.name, inv_num)
                 o3=extract_new_provider(tmp.name, inv_num)
@@ -345,7 +345,7 @@ def convert():
         if not all_rows:
             return "Sin registros extraídos", 400
 
-        # ─── normalización final ───
+        # Normalización final
         norm=[]
         for r in all_rows:
             if "GrossUnitPrice" not in r and "Unit Price" in r:
