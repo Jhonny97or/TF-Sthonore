@@ -6,46 +6,35 @@ TF‑StHonoré – Conversor PDF → Excel (v2025‑07)
 · extract_slice             (layout por columnas fijas)
 · extract_new_provider      (proveedor Dior “No. Description … Each”)
 · extract_tepf_scalp        (líneas TE/PF … UN xx … gencod)
-· extract_camelot_layout    (usa Camelot para la tabla “No. Description UPC…”)
+· extract_table_layout      (nuevo layout “No. Description UPC…” usando detección de tablas)
 """
 
-import logging, os, re, tempfile
+import logging, os, re, tempfile, traceback
 from collections import defaultdict
 from io import BytesIO
 from typing import List, Dict
 
 import pdfplumber
-import camelot
 from flask import Flask, request, send_file
 from openpyxl import Workbook
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Logging
-# ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
+# evitar warning de CropBox
 logging.getLogger("pdfplumber").setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Excel header
-# ─────────────────────────────────────────────────────────────────────────────
 COLS = [
     "Reference","Code EAN","Custom Code","Description","Origin",
     "Quantity","GrossUnitPrice","NetUnitPrice","POSM FOC",
     "GrossTotalExclVAT","TotalAI","Invoice Number","Order Name","gencod"
 ]
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Global patterns
-# ─────────────────────────────────────────────────────────────────────────────
 ORD_NAME_PAT = re.compile(r"V\/CDE[^\n]*?ORD(?:ER)?\s*Nr\s*[:\-]\s*(.+)", re.I)
 FC_PAT       = re.compile(r"FC-\d{3}-\d{2}-\d{5}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Numeric helpers
-# ─────────────────────────────────────────────────────────────────────────────
 def fnum(txt: str) -> float:
     return float(txt.replace(".", "").replace(",", ".").strip() or 0)
 
@@ -231,32 +220,40 @@ def extract_new_provider(pdf_path: str, inv_num: str) -> List[dict]:
                     unit  = float(d["unit"].replace(",", "")) 
                     total = float(d["total"].replace(",", ""))
                     posm  = float(d.get("posm","0").replace(",", "")) if d.get("posm") else 0
-                    rows.append({**{
-                        "Reference": d["ref"], "Code EAN": d["upc"], "Custom Code": d["hs"],
-                        "Description": d["desc"].strip(), "Origin": d["ctry"],
-                        "Quantity": to_int2(d["qty"]),
-                        "GrossUnitPrice": unit, "NetUnitPrice": unit,
-                        "POSM FOC": posm,
-                        "GrossTotalExclVAT": total, "TotalAI": total,
-                        "Invoice Number": inv_num, "gencod": ""
-                    }})
-                    pend=None
-                    continue
+                    rows.append({
+                        "Reference":         d["ref"],
+                        "Code EAN":          d["upc"],
+                        "Custom Code":       d["hs"],
+                        "Description":       d["desc"].strip(),
+                        "Origin":            d["ctry"],
+                        "Quantity":          to_int2(d["qty"]),
+                        "GrossUnitPrice":    unit,
+                        "NetUnitPrice":      unit,
+                        "POSM FOC":          posm,
+                        "GrossTotalExclVAT": total,
+                        "TotalAI":           total,
+                        "Invoice Number":    inv_num
+                    })
+                    pend=None; continue
                 if (m2 := DIOR_BAS.match(ln)) and pend:
                     d=m2.groupdict()
                     unit  = float(d["unit"].replace(",", "")) 
                     total = float(d["total"].replace(",", ""))
-                    rows.append({**{
-                        "Reference": d["ref"], "Code EAN": d["upc"], "Custom Code": d["hs"],
-                        "Description": pend.strip(), "Origin": d["ctry"],
-                        "Quantity": to_int2(d["qty"]),
-                        "GrossUnitPrice": unit, "NetUnitPrice": unit,
-                        "POSM FOC": 0,
-                        "GrossTotalExclVAT": total, "TotalAI": total,
-                        "Invoice Number": inv_num, "gencod": ""
-                    }})
-                    pend=None
-                    continue
+                    rows.append({
+                        "Reference":         d["ref"],
+                        "Code EAN":          d["upc"],
+                        "Custom Code":       d["hs"],
+                        "Description":       pend.strip(),
+                        "Origin":            d["ctry"],
+                        "Quantity":          to_int2(d["qty"]),
+                        "GrossUnitPrice":    unit,
+                        "NetUnitPrice":      unit,
+                        "POSM FOC":          0,
+                        "GrossTotalExclVAT": total,
+                        "TotalAI":           total,
+                        "Invoice Number":    inv_num
+                    })
+                    pend=None; continue
                 if re.search(r"[A-Za-z]", ls) and not any(ls.startswith(x) for x in (
                     "Country of","Customer PO","Order No","Shipping Terms",
                     "Bill To","Finance","Total","CIF","Ship To"
@@ -280,63 +277,62 @@ def extract_tepf_scalp(pdf_path: str) -> List[dict]:
     rows=[]
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            lines=(page.extract_text() or "").split("\n")
+            lines = (page.extract_text() or "").split("\n")
             for i, ln in enumerate(lines):
                 if m := TEPF_RE.match(ln):
                     d=m.groupdict(); genc=""
                     for j in range(i+1, min(i+3, len(lines))):
                         if gm := re.search(r'gencod\s*[:\-]\s*(\d{13})', lines[j], re.I):
                             genc=gm.group(1); break
-                    rows.append({**{
-                        "Reference": d["art"], "Code EAN": "", "Custom Code": "",
-                        "Description": d["desc"].strip(), "Origin": "",
-                        "Quantity": to_int2(d["qty"]),
-                        "GrossUnitPrice": fnum(d["gup"]), "NetUnitPrice": fnum(d["ntp"]),
-                        "POSM FOC": "", "GrossTotalExclVAT": fnum(d["gtx"]),
-                        "TotalAI": fnum(d["nta"]),
-                        "Invoice Number": "", "gencod": genc
-                    }})
+                    rows.append({
+                        "Reference":         d["art"],
+                        "Code EAN":          "",
+                        "Custom Code":       "",
+                        "Description":       d["desc"].strip(),
+                        "Origin":            "",
+                        "Quantity":          to_int2(d["qty"]),
+                        "GrossUnitPrice":    fnum(d["gup"]),
+                        "NetUnitPrice":      fnum(d["ntp"]),
+                        "POSM FOC":          "",
+                        "GrossTotalExclVAT": fnum(d["gtx"]),
+                        "TotalAI":           fnum(d["nta"]),
+                        "Invoice Number":    "",
+                        "gencod":            genc
+                    })
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXTRACTOR 5: Camelot para tabla “No. Description UPC…”
+# EXTRACTOR 5: detectar tablas “No. Description UPC…” con pdfplumber.find_tables
 # ─────────────────────────────────────────────────────────────────────────────
-def extract_camelot_layout(pdf_path: str, inv_num: str) -> List[dict]:
-    rows: List[dict] = []
-    # flavor='stream' suele detectar incluso sin líneas
-    tables = camelot.read_pdf(pdf_path, pages="all", flavor="stream", strip_text="\n")
-    for table in tables:
-        df = table.df  # pandas DataFrame
-        header = df.iloc[0].tolist()
-        if "No." in header and "UPC" in header:
-            for _, row in df.iloc[1:].iterrows():
-                ref    = row[header.index("No.")].strip()
-                desc   = row[header.index("Description")].strip()
-                upc    = row[header.index("UPC")].strip()
-                origin = row[header.index("Country of Origin")].strip() if "Country of Origin" in header else ""
-                hs     = row[header.index("HS Code")].strip()            if "HS Code" in header else ""
-                qty    = row[header.index("Quantity")]
-                unit   = row[header.index("Unit Price")]
-                posm   = row[header.index("POSM FOC")]
-                line   = row[header.index("Line Amount")]
-                if not ref:
-                    continue
-                rows.append({
-                    "Reference":         ref,
-                    "Code EAN":          upc,
-                    "Custom Code":       hs,
-                    "Description":       desc,
-                    "Origin":            origin,
-                    "Quantity":          to_int2(qty),
-                    "GrossUnitPrice":    fnum(unit),
-                    "NetUnitPrice":      fnum(unit),
-                    "POSM FOC":          0 if posm.strip() in ("","-") else fnum(posm),
-                    "GrossTotalExclVAT": fnum(line),
-                    "TotalAI":           fnum(line),
-                    "Invoice Number":    inv_num,
-                    "gencod":            ""
-                })
-            break
+def extract_table_layout(pdf_path:str, inv_num:str) -> List[dict]:
+    rows=[]
+    settings = {"vertical_strategy":"lines", "horizontal_strategy":"lines"}
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            for table in page.find_tables(table_settings=settings):
+                data = table.extract()
+                if not data: continue
+                header = [c.strip() for c in data[0]]
+                if "No." in header and "UPC" in header:
+                    for r in data[1:]:
+                        # r = [No., Description, UPC, Country of Origin, HS Code, Quantity, U.of M., Unit Price, POSM FOC, Line Amount]
+                        ref, desc, upc, origin, hs, qty_s, _, unit_s, posm_s, line_s = [cell or "" for cell in r]
+                        if not ref.strip(): continue
+                        rows.append({
+                            "Reference":         ref.strip(),
+                            "Code EAN":          upc.strip(),
+                            "Custom Code":       hs.strip(),
+                            "Description":       desc.strip(),
+                            "Origin":            origin.strip(),
+                            "Quantity":          to_int2(qty_s),
+                            "GrossUnitPrice":    fnum(unit_s),
+                            "NetUnitPrice":      fnum(unit_s),
+                            "POSM FOC":          0 if posm_s.strip() in ("","-") else fnum(posm_s),
+                            "GrossTotalExclVAT": fnum(line_s),
+                            "TotalAI":           fnum(line_s),
+                            "Invoice Number":    inv_num,
+                            "gencod":            ""
+                        })
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -352,32 +348,34 @@ def convert():
 
         all_rows: List[dict] = []
         for pdf in pdfs:
-            # salvar temporal
+            # guardar PDF temporal
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
 
-            # texto completo
+            # extraer texto completo
             with pdfplumber.open(tmp.name) as p:
                 full_txt = "\n".join(pg.extract_text() or "" for pg in p.pages)
 
-            # invoice y order
+            # Invoice Number
             inv_num = ""
             if m := FC_PAT.search(full_txt):
                 inv_num = m.group(0)
             elif m := re.search(r"SIP(\d+)", pdf.filename or ""):
                 inv_num = m.group(1)
+
+            # Order Name
             order_name = ORD_NAME_PAT.search(full_txt).group(1).strip() if ORD_NAME_PAT.search(full_txt) else ""
 
-            # extract all
+            # llamar extractores
             o1 = extract_original(tmp.name)
             o2 = extract_slice(tmp.name, inv_num)
             o3 = extract_new_provider(tmp.name, inv_num)
             o4 = extract_tepf_scalp(tmp.name)
             for r in o4:
                 r["Invoice Number"] = inv_num
-            o5 = extract_camelot_layout(tmp.name, inv_num)
+            o5 = extract_table_layout(tmp.name, inv_num)
 
-            # combinar y dedupe
+            # combinar + dedupe
             combined = o1 + o2 + o3 + o4 + o5
             seen, uniq = set(), []
             for r in combined:
@@ -402,7 +400,7 @@ def convert():
             if not r.get("Code EAN") and r.get("gencod"):
                 r["Code EAN"] = r["gencod"]
 
-        # generar Excel
+        # escribir Excel
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
@@ -416,6 +414,7 @@ def convert():
             download_name="extracted_data.xlsx",
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+
     except Exception:
         logging.exception("Error en /convert")
         return f"<pre>{traceback.format_exc()}</pre>", 500
