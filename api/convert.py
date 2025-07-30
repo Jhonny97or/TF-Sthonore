@@ -7,10 +7,10 @@ TF‑StHonoré – Conversor PDF → Excel (v2025‑07)
 · extract_new_provider      (proveedor Dior “No. Description … Each”)
 · extract_tepf_scalp        (líneas TE/PF … UN xx … gencod)
 · extract_table_layout      (layout “No. Description UPC…” con pdfplumber.find_tables)
-· extract_layout6           (nuevo layout CODE DESCRIPTION QTY U.M UNIT PRICE …)
+· extract_layout6           (nuevo layout CODE DESCRIPTION QTY U.M UNIT PRICE … con filtro de página y logs)
 """
 
-import logging, os, re, tempfile, traceback
+import logging, os, re, tempfile, time, traceback
 from collections import defaultdict
 from io import BytesIO
 from typing import List, Dict
@@ -20,22 +20,32 @@ from flask import Flask, request, send_file
 from openpyxl import Workbook
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Logging setup
+# ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
-# Suprimir warnings de CropBox
 logging.getLogger("pdfplumber").setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Excel columns
+# ─────────────────────────────────────────────────────────────────────────────
 COLS = [
     "Reference","Code EAN","Custom Code","Description","Origin",
     "Quantity","GrossUnitPrice","NetUnitPrice","POSM FOC",
     "GrossTotalExclVAT","TotalAI","Invoice Number","Order Name","gencod"
 ]
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Global patterns
+# ─────────────────────────────────────────────────────────────────────────────
 ORD_NAME_PAT = re.compile(r"V\/CDE[^\n]*?ORD(?:ER)?\s*Nr\s*[:\-]\s*(.+)", re.I)
 FC_PAT       = re.compile(r"FC-\d{3}-\d{2}-\d{5}")
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Numeric helpers
+# ─────────────────────────────────────────────────────────────────────────────
 def fnum(txt: str) -> float:
     return float(txt.replace(".", "").replace(",", ".").strip() or 0)
 
@@ -75,53 +85,67 @@ def extract_original(pdf_path: str) -> List[dict]:
             if m := PROF_PAT.search(full_txt):      inv = m.group(1)
             elif m := ORDER_EN.search(full_txt):    inv = m.group(1)
             elif m := ORDER_FR.search(full_txt):    inv = m.group(1)
-
         invoice_no = inv + ("PLV" if plv else "")
-        origin_global = ""
 
+        origin_global = ""
         for page in pdf.pages:
             lines = (page.extract_text() or "").split("\n")
-            # capturar Origin
             for ln in lines:
-                if mo := ORG_PAT.search(ln):
-                    if mo.group(1).strip():
-                        origin_global = mo.group(1).strip()
-            # procesar líneas de datos
+                if mo := ORG_PAT.search(ln) and mo.group(1).strip():
+                    origin_global = mo.group(1).strip()
             for i, raw in enumerate(lines):
                 ln = raw.strip()
                 if kind=="factura" and (m:=ROW_FACT.match(ln)):
                     ref, ean, cust, qty, unit, total = m.groups()
                     desc = lines[i+1].strip() if i+1<len(lines) and not ROW_FACT.match(lines[i+1]) else ""
                     rows.append({
-                        "Reference": ref, "Code EAN": ean, "Custom Code": cust,
-                        "Description": desc, "Origin": origin_global,
-                        "Quantity": to_int2(qty),
-                        "GrossUnitPrice": fnum(unit), "NetUnitPrice": fnum(unit),
-                        "POSM FOC": "", "GrossTotalExclVAT": fnum(total),
-                        "TotalAI": fnum(total), "Invoice Number": invoice_no
+                        "Reference":         ref,
+                        "Code EAN":          ean,
+                        "Custom Code":       cust,
+                        "Description":       desc,
+                        "Origin":            origin_global,
+                        "Quantity":          to_int2(qty),
+                        "GrossUnitPrice":    fnum(unit),
+                        "NetUnitPrice":      fnum(unit),
+                        "POSM FOC":          "",
+                        "GrossTotalExclVAT": fnum(total),
+                        "TotalAI":           fnum(total),
+                        "Invoice Number":    invoice_no
                     })
                 elif kind=="proforma" and (m:=ROW_PROF_D.match(ln)):
                     ref, ean, cust, qty, unit, total = m.groups()
                     desc = lines[i+1].strip() if i+1<len(lines) else ""
                     rows.append({
-                        "Reference": ref, "Code EAN": ean, "Custom Code": cust,
-                        "Description": desc, "Origin": origin_global,
-                        "Quantity": to_int2(qty),
-                        "GrossUnitPrice": fnum(unit), "NetUnitPrice": fnum(unit),
-                        "POSM FOC": "", "GrossTotalExclVAT": fnum(total),
-                        "TotalAI": fnum(total), "Invoice Number": invoice_no
+                        "Reference":         ref,
+                        "Code EAN":          ean,
+                        "Custom Code":       cust,
+                        "Description":       desc,
+                        "Origin":            origin_global,
+                        "Quantity":          to_int2(qty),
+                        "GrossUnitPrice":    fnum(unit),
+                        "NetUnitPrice":      fnum(unit),
+                        "POSM FOC":          "",
+                        "GrossTotalExclVAT": fnum(total),
+                        "TotalAI":           fnum(total),
+                        "Invoice Number":    invoice_no
                     })
                 elif kind=="proforma" and (m:=ROW_PROF.match(ln)):
                     ref, ean, unit, qty = m.groups()
                     qty_i, unit_f = to_int2(qty), fnum(unit)
                     desc = lines[i+1].strip() if i+1<len(lines) else ""
                     rows.append({
-                        "Reference": ref, "Code EAN": ean, "Custom Code": "",
-                        "Description": desc, "Origin": origin_global,
-                        "Quantity": qty_i,
-                        "GrossUnitPrice": unit_f, "NetUnitPrice": unit_f,
-                        "POSM FOC": "", "GrossTotalExclVAT": unit_f*qty_i,
-                        "TotalAI": unit_f*qty_i, "Invoice Number": invoice_no
+                        "Reference":         ref,
+                        "Code EAN":          ean,
+                        "Custom Code":       "",
+                        "Description":       desc,
+                        "Origin":            origin_global,
+                        "Quantity":          qty_i,
+                        "GrossUnitPrice":    unit_f,
+                        "NetUnitPrice":      unit_f,
+                        "POSM FOC":          "",
+                        "GrossTotalExclVAT": unit_f*qty_i,
+                        "TotalAI":           unit_f*qty_i,
+                        "Invoice Number":    invoice_no
                     })
     # rellenar Origin faltantes
     inv2orig = defaultdict(set)
@@ -347,13 +371,20 @@ def extract_table_layout(pdf_path:str, inv_num:str) -> List[dict]:
 
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTRACTOR 6: nuevo layout CODE DESCRIPTION QTY U.M UNIT PRICE …
+# con filtro de página y logs
 # ─────────────────────────────────────────────────────────────────────────────
 def extract_layout6(pdf_path: str, inv_num: str) -> List[dict]:
+    logging.info("▶️ extract_layout6 iniciado")
+    start = time.time()
     rows: List[dict] = []
     code_desc_re = re.compile(r"^(?P<ref>\w+)\s+(?P<desc>.+)$")
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            lines = (page.extract_text() or "").split("\n")
+        for page_num, page in enumerate(pdf.pages, start=1):
+            text = page.extract_text() or ""
+            if "Packing No." not in text:
+                continue
+            logging.info(f" extract_layout6 → procesando página {page_num}")
+            lines = text.split("\n")
             i = 0
             while i < len(lines):
                 line = lines[i].strip()
@@ -361,12 +392,9 @@ def extract_layout6(pdf_path: str, inv_num: str) -> List[dict]:
                 if m:
                     ref  = m.group("ref").strip()
                     desc = m.group("desc").strip()
-                    hs_line = ""
-                    origin  = ""
-                    upc     = ""
-                    j = i + 1
-                    # capturar HS Code y EAN Code
-                    while j < len(lines) and ":" in lines[j]:
+                    hs_line = origin = upc = ""
+                    # capturar HS y EAN
+                    for j in range(i+1, min(i+5, len(lines))):
                         l = lines[j].strip()
                         if l.startswith("HS Code"):
                             mo = re.search(r"HS Code[:\-]?\s*([\d\.]+),\s*Origin[:\-]?\s*([A-Z]{2})", l)
@@ -377,38 +405,40 @@ def extract_layout6(pdf_path: str, inv_num: str) -> List[dict]:
                             mo = re.search(r"EAN Code[:\-]?\s*(\d+)", l)
                             if mo:
                                 upc = mo.group(1).strip()
-                        j += 1
-                    # ahora la línea con QTY, U.M, UNIT PRICE, GROSS AMOUNT, LINE AMOUNT
-                    if j < len(lines):
-                        parts = lines[j].split()
-                        qty_s  = parts[0]
-                        unit_s = parts[2] if len(parts) > 2 else "0"
-                        # tomar el penúltimo como line amount
-                        line_s = parts[-2] if len(parts) > 1 else parts[-1]
-                        rows.append({
-                            "Reference":         ref,
-                            "Code EAN":          upc,
-                            "Custom Code":       hs_line,
-                            "Description":       desc,
-                            "Origin":            origin,
-                            "Quantity":          to_int2(qty_s),
-                            "GrossUnitPrice":    fnum(unit_s),
-                            "NetUnitPrice":      fnum(unit_s),
-                            "POSM FOC":          0,
-                            "GrossTotalExclVAT": fnum(line_s),
-                            "TotalAI":           fnum(line_s),
-                            "Invoice Number":    inv_num,
-                            "gencod":            ""
-                        })
-                        i = j
+                    # buscar QTY+UNITPRICE+LINEAMOUNT
+                    for k in range(i+1, min(i+6, len(lines))):
+                        parts = lines[k].split()
+                        if len(parts) >= 4 and parts[0].isdigit():
+                            qty_s  = parts[0]
+                            unit_s = parts[2]
+                            line_s = parts[-2] if len(parts) > 1 else parts[-1]
+                            rows.append({
+                                "Reference":         ref,
+                                "Code EAN":          upc,
+                                "Custom Code":       hs_line,
+                                "Description":       desc,
+                                "Origin":            origin,
+                                "Quantity":          to_int2(qty_s),
+                                "GrossUnitPrice":    fnum(unit_s),
+                                "NetUnitPrice":      fnum(unit_s),
+                                "POSM FOC":          0,
+                                "GrossTotalExclVAT": fnum(line_s),
+                                "TotalAI":           fnum(line_s),
+                                "Invoice Number":    inv_num,
+                                "gencod":            ""
+                            })
+                            i = k
+                            break
                     else:
                         i += 1
                     continue
                 i += 1
+            break
+    logging.info(f"✅ extract_layout6 finalizado en {time.time()-start:.2f}s, filas: {len(rows)}")
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENDPOINT /convert (combina extractores 1–6)
+# ENDPOINT /convert
 # ─────────────────────────────────────────────────────────────────────────────
 @app.route("/api/convert", methods=["POST"])
 @app.route("/", methods=["POST"])
@@ -420,10 +450,11 @@ def convert():
 
         all_rows: List[dict] = []
         for pdf in pdfs:
+            # guardar temporal
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
 
-            # extraer texto completo
+            # texto completo
             with pdfplumber.open(tmp.name) as p:
                 full_txt = "\n".join(pg.extract_text() or "" for pg in p.pages)
 
@@ -435,6 +466,7 @@ def convert():
 
             order_name = ORD_NAME_PAT.search(full_txt).group(1).strip() if ORD_NAME_PAT.search(full_txt) else ""
 
+            # llamar a todos los extractores
             o1 = extract_original(tmp.name)
             o2 = extract_slice(tmp.name, inv_num)
             o3 = extract_new_provider(tmp.name, inv_num)
@@ -444,6 +476,7 @@ def convert():
             o5 = extract_table_layout(tmp.name, inv_num)
             o6 = extract_layout6(tmp.name, inv_num)
 
+            # combinar y dedupe
             combined = o1 + o2 + o3 + o4 + o5 + o6
             seen, uniq = set(), []
             for r in combined:
