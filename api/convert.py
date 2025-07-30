@@ -24,17 +24,16 @@ from flask import Flask, request, send_file
 from openpyxl import Workbook
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Configuración logging y supresión de warnings molestos de pdfplumber
+# Configuración logging y supresión de warnings de CropBox
 # ─────────────────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
-# Suprimir únicamente las advertencias de CropBox
 logging.getLogger("pdfplumber").setLevel(logging.ERROR)
 
 app = Flask(__name__)
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Cabecera Excel
+# Cabecera de columnas para el Excel
 # ─────────────────────────────────────────────────────────────────────────────
 COLS = [
     "Reference", "Code EAN", "Custom Code", "Description", "Origin",
@@ -46,18 +45,22 @@ COLS = [
 ORD_NAME_PAT = re.compile(r"V\/CDE[^\n]*?ORD(?:ER)?\s*[:\-]\s*(.+)", re.I)
 FC_PAT       = re.compile(r"FC-\d{3}-\d{2}-\d{5}")
 
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers numéricos
+# ─────────────────────────────────────────────────────────────────────────────
 def fnum(txt: str) -> float:
     return float(txt.replace(".", "").replace(",", ".").strip() or 0)
 
 def to_float2(txt: str) -> float:
-    t = txt.replace("\u202f","").replace(" ","")
-    if t.count(",")==1 and t.count(".")==0: t = t.replace(",",".")
-    elif t.count(".")>1:                t = t.replace(".","")
+    t = txt.replace("\u202f", "").replace(" ", "")
+    if t.count(",") == 1 and t.count(".") == 0:
+        t = t.replace(",", ".")
+    elif t.count(".") > 1:
+        t = t.replace(".", "")
     return float(t or 0)
 
 def to_int2(txt: str) -> int:
-    digits = re.sub(r"[^\d]","", txt or "")
+    digits = re.sub(r"[^\d]", "", txt or "")
     return int(digits) if digits else 0
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -85,7 +88,7 @@ def doc_kind(text: str) -> str:
     return "proforma" if "PROFORMA" in up or ("ACKNOWLEDGE" in up and "RECEPTION" in up) else "factura"
 
 def extract_original(pdf_path: str) -> List[dict]:
-    rows = []
+    rows: List[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         all_txt = "\n".join(page.extract_text() or "" for page in pdf.pages)
         kind = doc_kind(all_txt)
@@ -105,65 +108,53 @@ def extract_original(pdf_path: str) -> List[dict]:
         for page in pdf.pages:
             lines = (page.extract_text() or "").split("\n")
             for ln in lines:
-                if mo := ORG_PAT.search(ln) and mo.group(1).strip():
-                    org_global = mo.group(1).strip()
+                if mo := ORG_PAT.search(ln):
+                    if mo.group(1).strip():
+                        org_global = mo.group(1).strip()
             for i, raw in enumerate(lines):
                 ln = raw.strip()
-                # Factura clásica
                 if kind == "factura" and (mf := ROW_FACT.match(ln)):
                     ref, ean, custom, qty_s, unit_s, tot_s = mf.groups()
                     desc = ""
                     if i+1 < len(lines) and not ROW_FACT.match(lines[i+1]):
                         desc = lines[i+1].strip()
                     rows.append({
-                        "Reference":ref, "Code EAN":ean, "Custom Code":custom,
-                        "Description":desc, "Origin":org_global,
-                        "Quantity":to_int2(qty_s),
-                        "GrossUnitPrice":fnum(unit_s),
-                        "NetUnitPrice":fnum(unit_s),
-                        "POSM FOC":"",
-                        "GrossTotalExclVAT":fnum(tot_s),
-                        "TotalAI":fnum(tot_s),
-                        "Invoice Number":invoice_full
+                        "Reference": ref, "Code EAN": ean, "Custom Code": custom,
+                        "Description": desc, "Origin": org_global,
+                        "Quantity": to_int2(qty_s),
+                        "GrossUnitPrice": fnum(unit_s), "NetUnitPrice": fnum(unit_s),
+                        "POSM FOC": "", "GrossTotalExclVAT": fnum(tot_s),
+                        "TotalAI": fnum(tot_s), "Invoice Number": invoice_full
                     })
-                # Proforma Dior
-                elif kind=="proforma" and (mpd:=ROW_PROF_DIOR.match(ln)):
+                elif kind == "proforma" and (mpd := ROW_PROF_DIOR.match(ln)):
                     ref, ean, custom, qty_s, unit_s, tot_s = mpd.groups()
-                    desc = lines[i+1].strip() if i+1<len(lines) else ""
+                    desc = lines[i+1].strip() if i+1 < len(lines) else ""
                     rows.append({
-                        "Reference":ref, "Code EAN":ean, "Custom Code":custom,
-                        "Description":desc, "Origin":org_global,
-                        "Quantity":to_int2(qty_s),
-                        "GrossUnitPrice":fnum(unit_s),
-                        "NetUnitPrice":fnum(unit_s),
-                        "POSM FOC":"",
-                        "GrossTotalExclVAT":fnum(tot_s),
-                        "TotalAI":fnum(tot_s),
-                        "Invoice Number":invoice_full
+                        "Reference": ref, "Code EAN": ean, "Custom Code": custom,
+                        "Description": desc, "Origin": org_global,
+                        "Quantity": to_int2(qty_s),
+                        "GrossUnitPrice": fnum(unit_s), "NetUnitPrice": fnum(unit_s),
+                        "POSM FOC": "", "GrossTotalExclVAT": fnum(tot_s),
+                        "TotalAI": fnum(tot_s), "Invoice Number": invoice_full
                     })
-                # Proforma genérico
-                elif kind=="proforma" and (mp:=ROW_PROF.match(ln)):
+                elif kind == "proforma" and (mp := ROW_PROF.match(ln)):
                     ref, ean, unit_s, qty_s = mp.groups()
-                    desc = lines[i+1].strip() if i+1<len(lines) else ""
+                    desc = lines[i+1].strip() if i+1 < len(lines) else ""
                     qty, unit = to_int2(qty_s), fnum(unit_s)
                     rows.append({
-                        "Reference":ref, "Code EAN":ean, "Custom Code":"",
-                        "Description":desc, "Origin":org_global,
-                        "Quantity":qty,
-                        "GrossUnitPrice":unit,
-                        "NetUnitPrice":unit,
-                        "POSM FOC":"",
-                        "GrossTotalExclVAT":unit*qty,
-                        "TotalAI":unit*qty,
-                        "Invoice Number":invoice_full
+                        "Reference": ref, "Code EAN": ean, "Custom Code": "",
+                        "Description": desc, "Origin": org_global,
+                        "Quantity": qty, "GrossUnitPrice": unit, "NetUnitPrice": unit,
+                        "POSM FOC": "", "GrossTotalExclVAT": unit*qty,
+                        "TotalAI": unit*qty, "Invoice Number": invoice_full
                     })
-    # Rellenar Origin faltantes si todos los items comparten uno solo
+
     inv2org = defaultdict(set)
     for r in rows:
         if r["Origin"]:
             inv2org[r["Invoice Number"]].add(r["Origin"])
     for r in rows:
-        if not r["Origin"] and len(inv2org[r["Invoice Number"]])==1:
+        if not r["Origin"] and len(inv2org[r["Invoice Number"]]) == 1:
             r["Origin"] = next(iter(inv2org[r["Invoice Number"]]))
     return rows
 
@@ -171,9 +162,9 @@ def extract_original(pdf_path: str) -> List[dict]:
 # EXTRACTOR 2: slice por columnas fijas
 # ─────────────────────────────────────────────────────────────────────────────
 COL_BOUNDS: Dict[str, tuple] = {
-    "ref":(0,70),"desc":(70,340),"upc":(340,430),"ctry":(430,465),
-    "hs":(465,535),"qty":(535,585),"unit":(585,635),
-    "posm":(635,675),"total":(675,755)
+    "ref": (0,70), "desc": (70,340), "upc": (340,430), "ctry": (430,465),
+    "hs": (465,535), "qty": (535,585), "unit": (585,635),
+    "posm": (635,675), "total": (675,755)
 }
 REF_PAT = re.compile(r"^\d{5,6}[A-Z]?$")
 UPC_PAT = re.compile(r"^\d{12,14}$")
@@ -183,25 +174,25 @@ SKIP_SNIPPETS = {
     "Invoice","Ship From","Ship To","VAT/Tax","Shipping Te"
 }
 
-def clean(txt:str)->str:
+def clean(txt: str) -> str:
     return txt.replace("\u202f"," ").strip()
 
-def rows_from_page(page)->List[Dict[str,str]]:
+def rows_from_page(page) -> List[Dict[str,str]]:
     rows, grouped = [], {}
     for ch in page.chars:
         grouped.setdefault(round(ch["top"],1), []).append(ch)
     for _, chs in sorted(grouped.items()):
-        raw = "".join(c["text"] for c in sorted(chs,key=lambda c:c["x0"]))
+        raw = "".join(c["text"] for c in sorted(chs, key=lambda c: c["x0"]))
         if not raw.strip() or any(sn in raw for sn in SKIP_SNIPPETS):
             continue
-        cols = {k:"" for k in COL_BOUNDS}
-        for ch in sorted(chs,key=lambda c:c["x0"]):
-            xm = (ch["x0"]+ch["x1"])/2
-            for k,(x0,x1) in COL_BOUNDS.items():
-                if x0<=xm<x1:
-                    cols[k]+=ch["text"]
+        cols = {k: "" for k in COL_BOUNDS}
+        for ch in sorted(chs, key=lambda c: c["x0"]):
+            xm = (ch["x0"] + ch["x1"]) / 2
+            for k, (x0, x1) in COL_BOUNDS.items():
+                if x0 <= xm < x1:
+                    cols[k] += ch["text"]
                     break
-        cols = {k:clean(v) for k,v in cols.items()}
+        cols = {k: clean(v) for k, v in cols.items()}
         if not cols["ref"]:
             if rows:
                 rows[-1]["desc"] += " " + cols["desc"]
@@ -213,8 +204,8 @@ def rows_from_page(page)->List[Dict[str,str]]:
         rows.append(cols)
     return rows
 
-def extract_slice(pdf_path:str, inv_num:str)->List[dict]:
-    rows=[]
+def extract_slice(pdf_path: str, inv_num: str) -> List[dict]:
+    rows: List[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         for p in pdf.pages:
             for r in rows_from_page(p):
@@ -235,7 +226,7 @@ def extract_slice(pdf_path:str, inv_num:str)->List[dict]:
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXTRACTOR 3: Dior “No. Description … Each”
+# EXTRACTOR 3: Dior “No. Description … Each”
 # ─────────────────────────────────────────────────────────────────────────────
 pat_full = re.compile(r"""
     ^\s*(?P<ref>\d{5,6}[A-Z]?)\s+
@@ -255,39 +246,40 @@ pat_basic = re.compile(r"""
     (?:-|(?P<posm>[\d.,]+))\s+(?P<total>[\d.,]+)
 """, re.VERBOSE)
 
-def extract_new_provider(pdf_path:str, inv_num:str)->List[dict]:
-    def nfloat(s:str)->float: return float(s.replace(",","") or 0)
-    rows=[]
+def extract_new_provider(pdf_path: str, inv_num: str) -> List[dict]:
+    def nfloat(s: str) -> float:
+        return float(s.replace(",", "") or 0)
+    rows: List[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             txt = page.extract_text() or ""
             if "No. Description" not in txt:
                 continue
-            pend=None
+            pend = None
             for ln in txt.split("\n"):
-                ls=ln.strip()
+                ls = ln.strip()
                 if not ls or ls.startswith(("No. Description","Invoice")):
                     continue
-                if m:=pat_full.match(ln):
-                    d=m.groupdict()
+                if m := pat_full.match(ln):
+                    d = m.groupdict()
                     rows.append({
                         "Reference":         d["ref"],
                         "Code EAN":          d["upc"],
                         "Custom Code":       d["hs"],
                         "Description":       d["desc"].strip(),
                         "Origin":            d["ctry"],
-                        "Quantity":          to_int2(d["qty"]),
+                        "Quantity":          to_int2(d["qty"]],
                         "GrossUnitPrice":    nfloat(d["unit"]),
                         "NetUnitPrice":      nfloat(d["unit"]),
-                        "POSM FOC":          nfloat(d.get("posm","")),
+                        "POSM FOC":          nfloat(d.get("posm","") ),
                         "GrossTotalExclVAT": nfloat(d["total"]),
                         "TotalAI":           nfloat(d["total"]),
                         "Invoice Number":    inv_num
                     })
-                    pend=None
+                    pend = None
                     continue
-                if (mb:=pat_basic.match(ln)) and pend:
-                    d=mb.groupdict()
+                if (mb := pat_basic.match(ln)) and pend:
+                    d = mb.groupdict()
                     rows.append({
                         "Reference":         d["ref"],
                         "Code EAN":          d["upc"],
@@ -302,13 +294,13 @@ def extract_new_provider(pdf_path:str, inv_num:str)->List[dict]:
                         "TotalAI":           nfloat(d["total"]),
                         "Invoice Number":    inv_num
                     })
-                    pend=None
+                    pend = None
                     continue
                 if re.search(r"[A-Za-z]", ls) and not any(ls.startswith(p) for p in (
                     "Country of","Customer PO","Order No","Shipping Terms",
                     "Bill To","Finance","Total","CIF","Ship To"
                 )):
-                    pend=(pend+" "+ls) if pend else ls
+                    pend = (pend + " " + ls) if pend else ls
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -323,18 +315,18 @@ TEPF_REGEX = re.compile(
     r'(?P<nta>[\d,]+)'
 )
 
-def extract_tepf_scalp(pdf_path:str)->List[dict]:
-    rows=[]
+def extract_tepf_scalp(pdf_path: str) -> List[dict]:
+    rows: List[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            lines=(page.extract_text() or "").split("\n")
-            for i,line in enumerate(lines):
-                if m:=TEPF_REGEX.match(line):
-                    d=m.groupdict()
-                    gencod=""
-                    for j in range(i+1, min(i+3,len(lines))):
-                        if gm:=re.search(r'gencod\s*[:\-]\s*(\d{13})', lines[j], re.I):
-                            gencod=gm.group(1)
+            lines = (page.extract_text() or "").split("\n")
+            for i, line in enumerate(lines):
+                if m := TEPF_REGEX.match(line):
+                    d = m.groupdict()
+                    gencod = ""
+                    for j in range(i+1, min(i+3, len(lines))):
+                        if gm := re.search(r'gencod\s*[:\-]\s*(\d{13})', lines[j], re.I):
+                            gencod = gm.group(1)
                             break
                     rows.append({
                         "Reference":         d["art"],
@@ -356,49 +348,48 @@ def extract_tepf_scalp(pdf_path:str)->List[dict]:
 # ─────────────────────────────────────────────────────────────────────────────
 # EXTRACTOR 5: nuevo layout “No. Description UPC … Line Amount”
 # ─────────────────────────────────────────────────────────────────────────────
-COL5_HEADER = re.compile(
-    r"No\.\s+Description\s+UPC\s+Country of\s+Origin\s+HS Code\s+Quantity\s+U\.of M\.\s+Unit Price\s+POSM FOC\s+Line Amount",
-    re.I
-)
-COL5_LINE = re.compile(r"""
-    ^\s*(?P<ref>\d+)\s+
-    (?P<desc>.+?)\s+
-    (?P<upc>\d{12,14})\s+
-    (?P<country>[A-Z]{2})\s+
-    (?P<hs>\d{4}\.\d{2}\.\d{4})\s+
-    (?P<qty>[\d,]+)\s+
-    (?P<uom>\w+)\s+
-    (?P<unit>[\d.,]+)\s+
-    (?P<posm>[\d\.,\-]+)\s+
-    (?P<line>[\d.,]+)
+LAYOUT5_RE = re.compile(r"""
+    ^\s*(?P<ref>\d+)\s+                     # No.
+    (?P<desc>.+?)\s+                        # Descripción
+    (?P<upc>\d{12,14})\s+                   # UPC
+    (?P<country>[A-Z]{2})\s+                # País
+    (?P<hs>\d{4}\.\d{2}\.\d{4})\s+         # HS Code
+    (?P<qty>[\d,]+)\s+                      # Cantidad
+    (?P<uom>\w+)\s+                         # U.of M.
+    (?P<unit>[\d.,]+)\s+                    # Precio unitario
+    (?P<posm>-|[\d.,]+)\s+                  # POSM FOC o “-”
+    (?P<line>[\d.,]+)                       # Line Amount
 """, re.VERBOSE)
 
-def extract_new_layout(pdf_path:str, inv_num:str)->List[dict]:
-    rows=[]
+def extract_new_layout(pdf_path: str, inv_num: str) -> List[dict]:
+    rows: List[dict] = []
+    logging.info("  > extract_new_layout: abriendo PDF")
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            txt=page.extract_text() or ""
-            if not COL5_HEADER.search(txt):
-                continue
-            for ln in txt.split("\n"):
-                if m:=COL5_LINE.match(ln):
-                    d=m.groupdict()
-                    posm_raw=d["posm"].strip()
-                    rows.append({
-                        "Reference":         d["ref"],
-                        "Code EAN":          d["upc"],
-                        "Custom Code":       d["hs"],
-                        "Description":       d["desc"].strip(),
-                        "Origin":            d["country"],
-                        "Quantity":          to_int2(d["qty"]),
-                        "GrossUnitPrice":    fnum(d["unit"]),
-                        "NetUnitPrice":      fnum(d["unit"]),
-                        "POSM FOC":          "" if posm_raw in ("-","") else fnum(posm_raw),
-                        "GrossTotalExclVAT": fnum(d["line"]),
-                        "TotalAI":           fnum(d["line"]),
-                        "Invoice Number":    inv_num,
-                        "gencod":            ""
-                    })
+            text = page.extract_text() or ""
+            for ln in text.split("\n"):
+                m = LAYOUT5_RE.match(ln)
+                if not m:
+                    continue
+                d = m.groupdict()
+                posm_raw = d["posm"]
+                posm_val = None if posm_raw == "-" else fnum(posm_raw)
+                rows.append({
+                    "Reference":         d["ref"],
+                    "Code EAN":          d["upc"],
+                    "Custom Code":       d["hs"],
+                    "Description":       d["desc"].strip(),
+                    "Origin":            d["country"],
+                    "Quantity":          to_int2(d["qty"]),
+                    "GrossUnitPrice":    fnum(d["unit"]),
+                    "NetUnitPrice":      fnum(d["unit"]),
+                    "POSM FOC":          "" if posm_raw=="-" else posm_val,
+                    "GrossTotalExclVAT": fnum(d["line"]),
+                    "TotalAI":           fnum(d["line"]),
+                    "Invoice Number":    inv_num,
+                    "gencod":            ""
+                })
+    logging.info(f"  < extract_new_layout: encontró {len(rows)} filas")
     return rows
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -414,9 +405,9 @@ def convert():
             logging.warning("No files uploaded")
             return "No file(s) uploaded", 400
 
-        all_rows = []
+        all_rows: List[dict] = []
         for pdf in pdfs:
-            # Guardar PDF temporal
+            # Guardar PDF
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
             logging.info(f"Saved temp PDF: {tmp.name}")
@@ -425,19 +416,19 @@ def convert():
             with pdfplumber.open(tmp.name) as p:
                 full_txt = "\n".join(pg.extract_text() or "" for pg in p.pages)
 
-            # Determinar invoice number
+            # Invoice Number
             inv_num = ""
             if m := FC_PAT.search(full_txt):
                 inv_num = m.group(0)
             elif m := re.search(r"SIP(\d+)", pdf.filename or ""):
                 inv_num = m.group(1)
 
-            # Determinar order name
+            # Order Name
             order_name = ""
             if m := ORD_NAME_PAT.search(full_txt):
                 order_name = m.group(1).strip()
 
-            # Ejecutar extractores con temporización
+            # Ejecutar extractores
             tasks = [
                 ("extract_original",     lambda: extract_original(tmp.name)),
                 ("extract_slice",        lambda: extract_slice(tmp.name, inv_num)),
@@ -445,7 +436,7 @@ def convert():
                 ("extract_tepf_scalp",   lambda: extract_tepf_scalp(tmp.name)),
                 ("extract_new_layout",   lambda: extract_new_layout(tmp.name, inv_num)),
             ]
-            segments = []
+            segments: List[dict] = []
             for name, fn in tasks:
                 logging.info(f"–> {name}…")
                 t0 = time.time()
@@ -487,12 +478,12 @@ def convert():
             if not r.get("Code EAN") and r.get("gencod"):
                 r["Code EAN"] = r["gencod"]
 
-        # Escribir Excel
+        # Generar Excel
         wb = Workbook()
         ws = wb.active
         ws.append(COLS)
         for r in all_rows:
-            ws.append([r.get(c,"") for c in COLS])
+            ws.append([r.get(c, "") for c in COLS])
 
         buf = BytesIO()
         wb.save(buf)
@@ -511,5 +502,4 @@ def convert():
 
 if __name__ == "__main__":
     app.run(debug=True, host="0.0.0.0")
-
 
