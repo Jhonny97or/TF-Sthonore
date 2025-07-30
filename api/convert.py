@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TF‑StHonoré – Conversor PDF → Excel (v2025‑07)
+TF‑StHonoré – Conversor PDF → Excel (v2025‑07)
 · extract_original          (facturas & proformas clásicas)
 · extract_slice             (layout por columnas fijas)
 · extract_new_provider      (proveedor Dior “No. Description … Each”)
 · extract_tepf_scalp        (líneas TE/PF … UN xx … gencod)
-· extract_table_layout      (nuevo layout “No. Description UPC…” usando detección de tablas)
 """
 
 import logging, os, re, tempfile, traceback
@@ -20,9 +19,6 @@ from openpyxl import Workbook
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s: %(message)s")
-# Suprimir warnings de CropBox
-logging.getLogger("pdfplumber").setLevel(logging.ERROR)
-
 app = Flask(__name__)
 
 # ———————————————————— cabecera final ————————————————————
@@ -48,6 +44,7 @@ def to_float2(txt: str) -> float:
     return float(t or 0)
 
 def to_int2(txt: str) -> int:
+    # Elimina TODO lo que no sea dígito (espacios, NBSP, puntos, comas, etc.)
     digits = re.sub(r"[^\d]", "", txt or "")
     return int(digits) if digits else 0
 
@@ -297,37 +294,6 @@ def extract_tepf_scalp(pdf_path:str)->List[dict]:
                     })
     return rows
 
-# ───────────────────── EXTRACTOR 5 (tablas “No. Description UPC…”) ─────────────────────
-def extract_table_layout(pdf_path:str, inv_num:str) -> List[dict]:
-    rows=[]
-    settings = {"vertical_strategy":"lines", "horizontal_strategy":"lines"}
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            for table in page.find_tables(table_settings=settings):
-                data = table.extract()
-                if not data: continue
-                header = [c.strip() for c in data[0]]
-                if "No." in header and "UPC" in header:
-                    for r in data[1:]:
-                        ref, desc, upc, origin, hs, qty_s, _, unit_s, posm_s, line_s = [cell or "" for cell in r]
-                        if not ref.strip(): continue
-                        rows.append({
-                            "Reference":         ref.strip(),
-                            "Code EAN":          upc.strip(),
-                            "Custom Code":       hs.strip(),
-                            "Description":       desc.strip(),
-                            "Origin":            origin.strip(),
-                            "Quantity":          to_int2(qty_s),
-                            "GrossUnitPrice":    fnum(unit_s),
-                            "NetUnitPrice":      fnum(unit_s),
-                            "POSM FOC":          0 if posm_s.strip() in ("","-") else fnum(posm_s),
-                            "GrossTotalExclVAT": fnum(line_s),
-                            "TotalAI":           fnum(line_s),
-                            "Invoice Number":    inv_num,
-                            "gencod":            ""
-                        })
-    return rows
-
 # ─────────────────────────── ENDPOINT ───────────────────────────
 @app.post("/api/convert")
 @app.post("/")
@@ -342,9 +308,11 @@ def convert():
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
 
+                # Extrae texto completo
                 with pdfplumber.open(tmp.name) as p:
-                    full_txt = "\n".join(pg.extract_text() or "" for pg in p.pages)
+                    full_txt="\n".join(pg.extract_text() or "" for pg in p.pages)
 
+                # Invoice Number
                 if m:=FC_PAT.search(full_txt):
                     inv_num=m.group(0)
                 elif m:=re.search(r"SIP(\d+)", pdf.filename or ""):
@@ -352,19 +320,18 @@ def convert():
                 else:
                     inv_num=""
 
-                order_name = ORD_NAME_PAT.search(full_txt).group(1).strip() if ORD_NAME_PAT.search(full_txt) else ""
+                # Order Name
+                order_name=""
+                if m:=ORD_NAME_PAT.search(full_txt):
+                    order_name=m.group(1).strip()
 
-                # aquí recuperas tu lógica original 1-4...
                 o1=extract_original(tmp.name)
                 o2=extract_slice(tmp.name, inv_num)
                 o3=extract_new_provider(tmp.name, inv_num)
                 o4=extract_tepf_scalp(tmp.name)
                 for r in o4: r["Invoice Number"]=inv_num
 
-                # ¡y añades el 5!
-                o5=extract_table_layout(tmp.name, inv_num)
-
-                combined = o1 + o2 + o3 + o4 + o5
+                combined=o1+o2+o3+o4
                 seen=set(); uniq=[]
                 for r in combined:
                     key=(r["Reference"], r.get("Code EAN",""), r["Invoice Number"])
@@ -373,13 +340,12 @@ def convert():
                         r["Order Name"]=order_name
                         uniq.append(r)
                 all_rows.extend(uniq)
-
             os.unlink(tmp.name)
 
         if not all_rows:
             return "Sin registros extraídos", 400
 
-        # normalización final
+        # Normalización final
         norm=[]
         for r in all_rows:
             if "GrossUnitPrice" not in r and "Unit Price" in r:
