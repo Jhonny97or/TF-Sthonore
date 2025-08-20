@@ -424,7 +424,7 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 })
     return rows
 # ─────────────────────  EXTRACTOR 5  (COTY)  ─────────────────────
-# Cabecera: "RefNo  EAN  Article ..."
+# Cabecera: "Ref. No. Customer ref. no. EAN Code Material ..."
 COTY_HEAD = re.compile(
     r"^(?P<ref>\d{6,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+)$"
 )
@@ -451,18 +451,22 @@ ISO2 = {
     "italy":"IT","italia":"IT",
     "germany":"DE","alemania":"DE",
     "united states":"US","usa":"US","estados unidos":"US",
-    "portugal":"PT","poland":"PL","fr":"FR","es":"ES","cn":"CN","it":"IT","de":"DE","us":"US"
+    "portugal":"PT","poland":"PL",
+    "fr":"FR","es":"ES","cn":"CN","it":"IT","de":"DE","us":"US"
 }
 
 def _euro_num(s: str) -> float:
-    if not s: return 0.0
+    if not s: 
+        return 0.0
     t = s.replace("\u202f","").replace(" ","")
     if t.count(",")==1:
         t = t.replace(".","").replace(",",".")
     else:
         t = t.replace(",","")
-    try: return float(t)
-    except: return 0.0
+    try:
+        return float(t)
+    except:
+        return 0.0
 
 def _qty_int(s: str) -> int:
     return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
@@ -479,12 +483,14 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
         nonlocal current
         if not current:
             return
-        if current.get("Quantity") is not None and current.get("Unit Price") is not None:
-            current.setdefault("Custom Code","")
-            current.setdefault("Code EAN","")
-            current.setdefault("Origin","")
-            current.setdefault("Invoice Number", invoice_number)
-            rows.append(current.copy())
+        # normalizamos con todas las columnas de OUTPUT_COLS
+        row = {}
+        for col in OUTPUT_COLS:
+            if col == "Invoice Number":
+                row[col] = invoice_number
+            else:
+                row[col] = current.get(col, "")
+        rows.append(row)
         current = None
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -507,10 +513,9 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                         "Description": gd["desc"].strip(),
                         "Custom Code": "",
                         "Origin": "",
-                        "Quantity": None,
-                        "Unit Price": None,
-                        "Total Price": None,
-                        "Invoice Number": invoice_number
+                        "Quantity": "",
+                        "Unit Price": "",
+                        "Total Price": ""
                     }
                     i += 1
                     continue
@@ -543,6 +548,8 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                     current["Total Price"] = total
                     flush()
                 i += 1
+
+    logging.info("Extractor5 (COTY) result rows=%d", len(rows))
     return rows
 
 
