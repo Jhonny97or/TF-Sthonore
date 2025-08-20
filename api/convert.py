@@ -425,7 +425,7 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
     return rows
 # ─────────────────────  EXTRACTOR 5  (COTY)  ─────────────────────
 COTY_HEAD = re.compile(
-    r"^(?P<ref>\d{5,15})\s+(?P<ean>\d{8,14})\s+(?P<desc>.+)$"
+    r"^(?P<ref>\d{5,15})\s+(?:(?P<cust>\w+)\s+)?(?P<ean>\d{8,14})\s+(?P<desc>.+)$"
 )
 
 COTY_HS = re.compile(r"\(H\s*S\s*No\.\s*(?P<hs>\d{6,12})\)", re.I)
@@ -445,21 +445,20 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
     rows = []
     current = None
 
-    def flush(force=False):
+    def flush():
         nonlocal current
         if not current:
             return
-        # solo si tenemos referencia y descripción
-        if current.get("Reference"):
-            # aunque falten números, exporta igual
-            current.setdefault("Code EAN", "")
-            current.setdefault("Custom Code", "")
-            current.setdefault("Origin", "")
-            current.setdefault("Quantity", 0)
-            current.setdefault("Unit Price", 0.0)
-            current.setdefault("Total Price", 0.0)
-            current["Invoice Number"] = invoice_number
-            rows.append(current.copy())
+        # rellena campos faltantes
+        current.setdefault("Customer Ref", "")
+        current.setdefault("Code EAN", "")
+        current.setdefault("Custom Code", "")
+        current.setdefault("Origin", "")
+        current.setdefault("Quantity", 0)
+        current.setdefault("Unit Price", 0.0)
+        current.setdefault("Total Price", 0.0)
+        current["Invoice Number"] = invoice_number
+        rows.append(current.copy())
         current = None
 
     with pdfplumber.open(pdf_path) as pdf:
@@ -477,8 +476,9 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                     gd = mh.groupdict()
                     current = {
                         "Reference": gd["ref"],
+                        "Customer Ref": gd.get("cust") or "",
                         "Code EAN": gd["ean"],
-                        "Description": gd["desc"].strip()
+                        "Description": gd["desc"].strip(),
                     }
                     continue
 
@@ -507,9 +507,9 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                     current["Total Price"] = total
                     flush()
 
-    # por si se quedó colgado el último
-    flush(force=True)
+    flush()
     return rows
+
 
 # ───────────  COMPLEMENTO: detectar Invoice No. dentro del PDF  ─────────────
 INVNO_PAT = re.compile(r"Invoice\s+No\.\s*([A-Z0-9\-\/]+)", re.I)
