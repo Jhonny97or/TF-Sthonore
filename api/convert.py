@@ -424,43 +424,18 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 })
     return rows
 # ─────────────────────  EXTRACTOR 5  (COTY)  ─────────────────────
-COTY_HEAD = re.compile(
-    r"^(?P<ref>\d{5,15})\s+(?:(?P<cust>\w+)\s+)?(?P<ean>\d{8,14})\s+(?P<desc>.+)$"
-)
-
-COTY_HS = re.compile(r"\(H\s*S\s*No\.\s*(?P<hs>\d{6,12})\)", re.I)
-COTY_ORG_EN = re.compile(r"Country of origin:\s*(?P<org>[A-Za-z\s]+)", re.I)
-COTY_ORG_ES = re.compile(r"Pa[ií]s de origen:\s*(?P<org>[A-Za-z\s]+)", re.I)
-
-COTY_TOTAL = re.compile(
-    r"""^\s*
-    (?P<qty>[\d\.\s,]+)\s+         # cantidad
-    (?P<unit>[\d\.,]+)\s+          # unit price
-    (?P<total>[\d\.,]+)            # total
-    (?P<stars>\*{1,2})?            # *, ** opcionales
-    \s*$""", re.X
+COTY_ROW = re.compile(
+    r"""^(?P<ref>\w+)\s+                # Ref. No.
+         (?P<cust>\w+)\s+               # Customer ref. no.
+         (?P<ean>\d{8,14})\s+           # EAN Code
+         (?P<desc>.+?)\s+               # Description / Article
+         (?P<qty>\d+(?:[\s.,]\d+)*)\s+  # Quantity (with , . or space)
+         (?P<price>[\d.,]+)$            # Price USD
+    """, re.X
 )
 
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
     rows = []
-    current = None
-
-    def flush():
-        nonlocal current
-        if not current:
-            return
-        # rellena campos faltantes
-        current.setdefault("Customer Ref", "")
-        current.setdefault("Code EAN", "")
-        current.setdefault("Custom Code", "")
-        current.setdefault("Origin", "")
-        current.setdefault("Quantity", 0)
-        current.setdefault("Unit Price", 0.0)
-        current.setdefault("Total Price", 0.0)
-        current["Invoice Number"] = invoice_number
-        rows.append(current.copy())
-        current = None
-
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             lines = (page.extract_text() or "").split("\n")
@@ -469,58 +444,27 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                 if not ln:
                     continue
 
-                # 1) Cabecera
-                mh = COTY_HEAD.match(ln)
-                if mh:
-                    flush()
-                    gd = mh.groupdict()
-                    current = {
+                m = COTY_ROW.match(ln)
+                if m:
+                    gd = m.groupdict()
+                    qty = _qty_int(gd["qty"])
+                    price = _euro_num(gd["price"])
+                    total = round(qty * price, 2)
+
+                    rows.append({
                         "Reference": gd["ref"],
-                        "Customer Ref": gd.get("cust") or "",
+                        "Customer Ref": gd["cust"],
                         "Code EAN": gd["ean"],
                         "Description": gd["desc"].strip(),
-                    }
-                    continue
-
-                if not current:
-                    continue
-
-                # 2) HS Code
-                if (mhs := COTY_HS.search(ln)):
-                    current["Custom Code"] = mhs.group("hs")
-
-                # 3) Country
-                morg = COTY_ORG_EN.search(ln) or COTY_ORG_ES.search(ln)
-                if morg:
-                    current["Origin"] = _to_iso2(morg.group("org"))
-
-                # 4) Totales
-                mt = COTY_TOTAL.match(ln)
-                if mt:
-                    qty = _qty_int(mt.group("qty"))
-                    unit = _euro_num(mt.group("unit"))
-                    total = _euro_num(mt.group("total"))
-                    if (mt.group("stars") or "") == "**":
-                        total = 0.0
-                    current["Quantity"] = qty
-                    current["Unit Price"] = unit
-                    current["Total Price"] = total
-                    flush()
-
-    flush()
+                        "Quantity": qty,
+                        "Unit Price": price,
+                        "Total Price": total,
+                        "Custom Code": "",
+                        "Origin": "",
+                        "Invoice Number": invoice_number
+                    })
     return rows
 
-
-# ───────────  COMPLEMENTO: detectar Invoice No. dentro del PDF  ─────────────
-INVNO_PAT = re.compile(r"Invoice\s+No\.\s*([A-Z0-9\-\/]+)", re.I)
-
-def parse_invoice_number_from_pdf(pdf_path: str) -> str:
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            txt = page.extract_text() or ""
-            if m := INVNO_PAT.search(txt):
-                return m.group(1).strip()
-    return ""
 
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
 def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
