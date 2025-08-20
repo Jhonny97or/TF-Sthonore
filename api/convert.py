@@ -605,6 +605,108 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                 i += 1
 
     return rows
+# ─────────────────────  EXTRACTOR 6 (Bulgari ASN: Pos/Ref/Q.ty…)  ─────────────────────
+ASN_HEAD = re.compile(r"^\s*Pos\.\s*Reference\s*-\s*Cust\.\s*Material", re.I)
+ASN_END  = re.compile(r"^(SUBTOTAL|TOTAL)\s*:", re.I)
+
+# Línea numérica (pos ref qty unit hs netw KG unit total)
+ASN_NUM = re.compile(
+    r"""^\s*
+    (?P<pos>\d{1,4})\s+
+    (?P<ref>\d{3,})\s+
+    (?P<qty>\d{1,6})\s+
+    (?P<unit>[A-Z]{2,4})\s+
+    (?P<hs>\d{8,10})\s+
+    (?P<netw>[\d\.,]+)\s+KG\s+
+    (?P<uprice>[\d\.,]+)\s+
+    (?P<total>[\d\.,]+)(?:\*+)?\s*$
+    """, re.X | re.I
+)
+
+ASN_ORIGIN = re.compile(r"^Origin:\s*(?P<org>.+)$", re.I)
+
+def _eu_to_float(s: str) -> float:
+    if not s: return 0.0
+    t = s.replace("\u202f","").replace(" ","")
+    if t.count(",")==1:
+        t = t.replace(".","").replace(",",".")
+    else:
+        t = t.replace(",","")
+    try:
+        return float(t)
+    except:
+        return 0.0
+
+def _to_int(s: str) -> int:
+    return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
+
+def extract_bulgari_asn(pdf_path: str, invoice_number: str) -> List[dict]:
+    """
+    Lee ítems en bloques de 3 líneas:
+      1) numérica: pos ref qty unit hs netw KG unit total
+      2) descripción (puede tener guiones)
+      3) 'Origin: <pais>'
+    """
+    rows: List[dict] = []
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            lines = [ln.strip() for ln in (page.extract_text(x_tolerance=1.2) or "").split("\n") if ln.strip()]
+
+            in_table = False
+            i = 0
+            while i < len(lines):
+                ln = lines[i]
+
+                if ASN_HEAD.search(ln):
+                    in_table = True
+                    i += 1
+                    continue
+                if not in_table:
+                    i += 1
+                    continue
+                if ASN_END.match(ln):
+                    in_table = False
+                    i += 1
+                    continue
+
+                m = ASN_NUM.match(ln)
+                if not m:
+                    i += 1
+                    continue
+
+                gd = m.groupdict()
+                # descripción = siguiente línea no vacía ni encabezado
+                desc = ""
+                org  = ""
+                if i + 1 < len(lines):
+                    desc = lines[i+1].strip()
+                if i + 2 < len(lines) and ASN_ORIGIN.match(lines[i+2]):
+                    org = ASN_ORIGIN.match(lines[i+2]).group("org").strip()
+                    step = 3
+                else:
+                    # a veces "Origin:" podría venir más abajo; busca hasta 3 líneas
+                    step = 2
+                    for k in range(i+2, min(i+5, len(lines))):
+                        mo = ASN_ORIGIN.match(lines[k])
+                        if mo:
+                            org = mo.group("org").strip()
+                            step = (k - i + 1)
+                            break
+
+                rows.append({
+                    "Reference": gd["ref"],
+                    "Code EAN": "",                # este layout no trae EAN
+                    "Custom Code": gd["hs"],
+                    "Description": desc,
+                    "Origin": org,
+                    "Quantity": _to_int(gd["qty"]),
+                    "Unit Price": _eu_to_float(gd["uprice"]),
+                    "Total Price": _eu_to_float(gd["total"]),
+                    "Invoice Number": invoice_number
+                })
+
+                i += step
+    return rows
 
 
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
@@ -671,9 +773,9 @@ def convert():
                 rows3=extract_new_provider(tmp.name,inv_num);             logging.info("r3=%d", len(rows3))
                 rows4=extract_interparfums_blocks(tmp.name,inv_num);      logging.info("r4=%d", len(rows4))
                 rows5=extract_coty(tmp.name, inv_num);                    logging.info("r5=%d", len(rows5))
+                rows6=extract_bulgari_asn(tmp.name, inv_num);             logging.info("r6=%d", len(rows6)
 
-                combo = rows1 + rows2 + rows3 + rows4 + rows5
-
+                combo = rows1 + rows2 + rows3 + rows4 + rows5 + rows6
                 # eliminar duplicados por (Reference, EAN, Invoice)
                 seen=set(); uniq=[]
                 for r in combo:
