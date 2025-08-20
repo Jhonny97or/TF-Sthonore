@@ -707,6 +707,162 @@ def extract_bulgari_asn(pdf_path: str, invoice_number: str) -> List[dict]:
 
                 i += step
     return rows
+# ─────────────────────  EXTRACTOR 7 (Interparfums USA: Order Confirmation)  ─────────────────────
+IPUSA_HEAD = re.compile(r"^\s*No\.\s*Description", re.I)
+IPUSA_END  = re.compile(r"^(Subtotal|Grand\s+Total|\$?\s*Grand\s+Total)", re.I)
+
+# Caso "una sola línea":   ref desc ... IT 3303.00.0000 720 720 Each 26.25 - 18,900.00
+IPUSA_ONE = re.compile(
+    r"""^\s*
+    (?P<ref>[A-Z0-9]{4,})\s+
+    (?P<desc>.+?)\s+
+    (?P<org>[A-Z]{2})\s+
+    (?P<hs>\d{4}\.\d{2}\.\d{4}|\d{6,10})\s+
+    (?P<qty>[\d,]+)\s+
+    (?P<res>[\d,]+)\s+
+    (?P<uom>[A-Za-z]+)\s+
+    (?P<unit>[\d\.,]+)\s+
+    (?P<posm>-|[\d\.,]+)\s+
+    (?P<total>[\d\.,]+)\s*$
+    """, re.X
+)
+
+# Caso "dos líneas": 1) ref + desc (solo)   2) IT HS qty res uom unit posm total
+IPUSA_HEAD_ONLY = re.compile(r"^\s*(?P<ref>[A-Z0-9]{4,})\s+(?P<desc>.+?)\s*$")
+IPUSA_NUM_LINE  = re.compile(
+    r"""^\s*
+    (?P<org>[A-Z]{2})\s+
+    (?P<hs>\d{4}\.\d{2}\.\d{4}|\d{6,10})\s+
+    (?P<qty>[\d,]+)\s+
+    (?P<res>[\d,]+)\s+
+    (?P<uom>[A-Za-z]+)\s+
+    (?P<unit>[\d\.,]+)\s+
+    (?P<posm>-|[\d\.,]+)\s+
+    (?P<total>[\d\.,]+)\s*$
+    """, re.X
+)
+
+IPUSA_UPC = re.compile(r"^UPC\s*:\s*(?P<ean>\d{11,14})\s*$", re.I)
+
+def _us_to_float(s: str) -> float:
+    if not s: return 0.0
+    t = s.replace("\u202f","").replace(" ","")
+    # en estos SO suele venir 18,900.00 (coma miles, punto decimal)
+    # quitamos comas miles; dejamos punto decimal
+    t = t.replace(",", "")
+    try:
+        return float(t)
+    except:
+        # fallback estilo europeo
+        if t.count(",")==1 and t.count(".")==0:
+            try:
+                return float(t.replace(",", "."))
+            except:
+                return 0.0
+        return 0.0
+
+def _to_int_clean(s: str) -> int:
+    return int(s.replace("\u202f","").replace(" ","").replace(",","").replace(".","") or 0)
+
+def extract_ipusa_order_conf(pdf_path: str, invoice_number: str) -> List[dict]:
+    """
+    Interparfums USA - Order Confirmation (SO…):
+      - Acepta una línea o dos líneas (desc multilínea).
+      - Lee UPC en la/s línea/s siguiente/s ("UPC: 0857…") y lo usa como Code EAN.
+    """
+    rows: List[dict] = []
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            # x_tolerance bajo para mantener el orden natural
+            lines = [ln.strip() for ln in (page.extract_text(x_tolerance=1.2) or "").split("\n") if ln.strip()]
+
+            in_table = False
+            i = 0
+            while i < len(lines):
+                ln = lines[i]
+
+                if IPUSA_HEAD.match(ln):
+                    in_table = True
+                    i += 1
+                    continue
+                if not in_table:
+                    i += 1
+                    continue
+                if IPUSA_END.match(ln):
+                    in_table = False
+                    i += 1
+                    continue
+
+                # 1) Intento "una sola línea"
+                m1 = IPUSA_ONE.match(ln)
+                if m1:
+                    gd = m1.groupdict()
+                    ean = ""
+                    # buscar UPC hacia adelante (hasta 3 líneas)
+                    for k in range(i+1, min(i+4, len(lines))):
+                        mu = IPUSA_UPC.match(lines[k])
+                        if mu:
+                            ean = mu.group("ean")
+                            break
+
+                    rows.append({
+                        "Reference": gd["ref"],
+                        "Code EAN": ean,
+                        "Custom Code": gd["hs"].replace(".", ""),
+                        "Description": gd["desc"],
+                        "Origin": gd["org"],
+                        "Quantity": _to_int_clean(gd["qty"]),
+                        "Unit Price": _us_to_float(gd["unit"]),
+                        "Total Price": _us_to_float(gd["total"]),
+                        "Invoice Number": invoice_number
+                    })
+                    i += 1
+                    continue
+
+                # 2) Intento "dos líneas": cabecera (ref+desc) + línea numérica
+                mh = IPUSA_HEAD_ONLY.match(ln)
+                if mh:
+                    ref = mh.group("ref")
+                    desc = mh.group("desc")
+
+                    # la numérica puede estar en la siguiente o dos más abajo si la desc se parte
+                    j = i + 1
+                    # acumula descripción en caso de salto de línea (hasta encontrar numérica o UPC)
+                    while j < len(lines) and not IPUSA_NUM_LINE.match(lines[j]) and not IPUSA_UPC.match(lines[j]):
+                        # si es una línea tipo "SPRAY" separada, concaténala
+                        if not IPUSA_HEAD_ONLY.match(lines[j]):
+                            desc = (desc + " " + lines[j]).strip()
+                        j += 1
+
+                    if j < len(lines) and IPUSA_NUM_LINE.match(lines[j]):
+                        gn = IPUSA_NUM_LINE.match(lines[j]).groupdict()
+                        ean = ""
+                        # busca UPC en las 3 líneas siguientes a la numérica
+                        for k in range(j+1, min(j+4, len(lines))):
+                            mu = IPUSA_UPC.match(lines[k])
+                            if mu:
+                                ean = mu.group("ean")
+                                break
+
+                        rows.append({
+                            "Reference": ref,
+                            "Code EAN": ean,
+                            "Custom Code": gn["hs"].replace(".", ""),
+                            "Description": desc,
+                            "Origin": gn["org"],
+                            "Quantity": _to_int_clean(gn["qty"]),
+                            "Unit Price": _us_to_float(gn["unit"]),
+                            "Total Price": _us_to_float(gn["total"]),
+                            "Invoice Number": invoice_number
+                        })
+                        i = j + 1
+                        continue
+
+                # si no hizo match, avanza
+                i += 1
+
+    return rows
 
 
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
@@ -774,8 +930,9 @@ def convert():
                 rows4=extract_interparfums_blocks(tmp.name,inv_num);      logging.info("r4=%d", len(rows4))
                 rows5=extract_coty(tmp.name, inv_num);                    logging.info("r5=%d", len(rows5))
                 rows6=extract_bulgari_asn(tmp.name, inv_num);             logging.info("r6=%d", len(rows6))
+                rows7 = extract_ipusa_order_conf(tmp.name, inv_num);        logging.info("r7=%d", len(rows7))
 
-                combo = rows1 + rows2 + rows3 + rows4 + rows5 + rows6
+                combo = rows1 + rows2 + rows3 + rows4 + rows5 + rows6 + rows7
                 # eliminar duplicados por (Reference, EAN, Invoice)
                 seen=set(); uniq=[]
                 for r in combo:
