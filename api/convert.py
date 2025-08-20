@@ -426,16 +426,38 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
 # ─────────────────────  EXTRACTOR 5 (COTY, robusto) ─────────────────────
 import re
 
-COTY_HEAD = re.compile(r"^Ref\.\s*No\.", re.I)
+# Cabeceras de tabla (ES/EN) y líneas que marcan fin de bloque
+_COTY_TABLE_HDR = re.compile(r"^(Ref\.\s*No\.|Ref\.\s*No\.\s*Customer|EAN\s*Code\s*Article|EAN\s*Code\s*Material)", re.I)
+_COTY_END_ROW   = re.compile(r"^(subtotal|total|carry\s*forward)", re.I)
+
+# Cabecera de ítem: Ref + EAN + descripción (en la misma línea)
+_COTY_HEAD = re.compile(
+    r"^\s*(?P<ref>\d{8,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+?)\s*$"
+)
+
+# Línea numérica: cantidad, unit price, total (a veces termina con * o **)
+_COTY_NUMS = re.compile(
+    r"^\s*(?P<qty>\d{1,6})\s+(?P<unit>[\d\.\,\s]+)\s+(?P<total>[\d\.\,]+)(?:\*+)?\s*$"
+)
+
+# HS y Origen (ES/EN), en líneas entre cabecera y números
+_COTY_HS    = re.compile(r"\(\s*H\s*S\s*No\.?\s*(?P<hs>\d{6,14})\s*\)", re.I)
+_COTY_ORGES = re.compile(r"Pa[ií]s\s+de\s+origen:\s*(?P<org>[A-Za-zÁÉÍÓÚÜÑ\s]+)", re.I)
+_COTY_ORGEN = re.compile(r"Country\s+of\s+origin:\s*(?P<org>[A-Za-zÁÉÍÓÚÜÑ\s]+)", re.I)
+
+# Ruido que no es parte de la descripción
+_SKIP_DESC_PREFIX = (
+    "Cont. Total", "Alcohol", "Alc-Cont", "Net Weight", "Peso Neto",
+    "L/","G", "CONT. TOTAL", "ALCOHOL", "ALCOHOL(VOC)",
+)
 
 def _coty_num(s: str) -> float:
-    if not s:
-        return 0.0
-    t = s.replace("\u202f","").replace(" ","")
-    if t.count(",")==1:
-        t = t.replace(".","").replace(",",".")
+    if not s: return 0.0
+    t = s.replace("\u202f","").replace(" ", "")
+    if t.count(",") == 1 and t.count(".") <= 1:
+        t = t.replace(".", "").replace(",", ".")
     else:
-        t = t.replace(",","")
+        t = t.replace(",", "")
     try:
         return float(t)
     except:
@@ -445,52 +467,92 @@ def _coty_qty(s: str) -> int:
     return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
 
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
-    rows=[]
+    """
+    Soporta ambos layouts de COTY:
+    - ES: 'EAN Code Material Ctdad. Precio USD' (totales con '**' = gratis)
+    - EN: 'EAN Code Article Qty Price USD'
+    Cabecera 'ref + ean + desc' y, en otra línea, 'qty unit total'.
+    Entre medias pueden aparecer HS y Origen.
+    """
+    rows: List[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text = page.extract_text() or ""
+            text = page.extract_text(x_tolerance=1.2) or ""
             lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+
             in_table = False
+            pending = None  # dict temporal de la fila en construcción
+
             for ln in lines:
-                if COTY_HEAD.match(ln):
+                # Activa/Desactiva parsing por cabecera/fin
+                if _COTY_TABLE_HDR.match(ln):
                     in_table = True
                     continue
                 if not in_table:
                     continue
-                if ln.lower().startswith(("subtotal","total","carry forward")):
+                if _COTY_END_ROW.match(ln):
+                    # Cierra tabla de esta página/bloque
                     in_table = False
+                    pending = None
                     continue
 
-                parts = ln.split()
-                if len(parts) < 5:
-                    continue
-
-                try:
-                    # Coty layout: RefNo, CustRef, EAN, Description..., Qty, Price, Total
-                    ref = parts[0]
-                    cust = parts[1]
-                    ean  = parts[2]
-
-                    qty   = _coty_qty(parts[-3])
-                    price = _coty_num(parts[-2])
-                    total = _coty_num(parts[-1])
-
-                    desc = " ".join(parts[3:-3])
-
-                    rows.append({
-                        "Reference": ref,
-                        "Customer Ref": cust,
-                        "Code EAN": ean,
-                        "Description": desc,
-                        "Quantity": qty,
-                        "Unit Price": price,
-                        "Total Price": total,
+                # 1) ¿Nueva cabecera de ítem?
+                mh = _COTY_HEAD.match(ln)
+                if mh:
+                    gd = mh.groupdict()
+                    # Si había una fila pendiente sin números, la descartamos (incompleta)
+                    pending = {
+                        "Reference": gd["ref"],
+                        "Code EAN": gd["ean"],
+                        "Description": gd["desc"].strip(),
                         "Custom Code": "",
                         "Origin": "",
+                        "Quantity": 0,
+                        "Unit Price": 0.0,
+                        "Total Price": 0.0,
                         "Invoice Number": invoice_number
-                    })
-                except Exception:
+                    }
                     continue
+
+                if not pending:
+                    # Saltar cualquier cosa hasta ver cabecera válida
+                    continue
+
+                # 2) ¿Línea de números (qty unit total)?
+                mn = _COTY_NUMS.match(ln)
+                if mn:
+                    q = _coty_qty(mn.group("qty"))
+                    u = _coty_num(mn.group("unit"))
+                    t = _coty_num(mn.group("total"))
+                    pending["Quantity"]   = q
+                    pending["Unit Price"] = u
+                    pending["Total Price"] = t
+                    rows.append(pending)
+                    pending = None
+                    continue
+
+                # 3) HS / Origen si aparecen “entre medias”
+                if not pending.get("Custom Code"):
+                    hs = _COTY_HS.search(ln)
+                    if hs:
+                        pending["Custom Code"] = hs.group("hs")
+                if not pending.get("Origin"):
+                    m_es = _COTY_ORGES.search(ln)
+                    m_en = _COTY_ORGEN.search(ln) if not m_es else None
+                    if m_es:
+                        pending["Origin"] = m_es.group("org").strip()
+                    elif m_en:
+                        pending["Origin"] = m_en.group("org").strip()
+
+                # 4) Acumular descripción multi-línea (filtrando ruido)
+                bad = any(ln.startswith(pref) for pref in _SKIP_DESC_PREFIX)
+                if not bad and not _COTY_TABLE_HDR.match(ln):
+                    # evita volver a meter líneas que claramente no son de la desc
+                    if not _COTY_NUMS.match(ln) and not _COTY_END_ROW.match(ln):
+                        # evita reinsertar cabeceras de página
+                        if not re.match(r"^(Ref\.\s*No\.|Page|P[aá]gina)", ln, re.I):
+                            pending["Description"] = (pending["Description"] + " " + ln).strip()
+
     return rows
 
 
