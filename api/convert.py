@@ -334,8 +334,10 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                         pending_desc=(pending_desc+" "+ln_s) if pending_desc else ln_s
     return rows
 
-# ──────────────────  EXTRACTOR 4  (Interparfums Italia / “bloques”)  ────────
-HEAD_PAT = re.compile(r"^(?P<ref>(?:JRC|JFE|JUG|INV|[A-Z0-9]{3,6}))\w*\s+(?P<desc>.+)$")
+# ──────────────────  EXTRACTOR 4 v3 (Interparfums por ventana)  ─────────────
+HEAD_CAND_PAT = re.compile(
+    r"^(?P<ref>(?:[A-Z]{3}\d{3,6}[A-Z]?|\d{4,6}[A-Z]?))\s+(?P<desc>.+)$"
+)
 HS_ORG_PAT = re.compile(r"HS\s*Code:\s*(?P<hs>\d{8,14})\s*,\s*Origin:\s*(?P<org>[A-Z]{2})", re.I)
 EAN_PAT = re.compile(r"EAN\s*Code:\s*(?P<ean>\d{12,14})", re.I)
 TOTAL_LINE_PAT = re.compile(
@@ -348,70 +350,94 @@ TOTAL_LINE_PAT = re.compile(
     $""", re.X | re.I
 )
 
-def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict]:
-    rows=[]
-    current=None
+BAD_HEAD_PREFIXES = (
+    "Invoice", "Document Date", "Invoice No.", "Location Page", "DESTINATION",
+    "Sell-to", "Ship-to", "Registered office", "Administrative headquarters",
+    "Share Capital", "Company belonging", "CIF", "Shipment Method",
+    "Your Reference", "Payment Bank", "Bonifico", "SWIFT", "Due Date",
+    "TOTAL GROSS AMOUNT", "VAT BASE", "NET TO PAY", "Customs Code",
+    "VALUES FOR CUSTOMS", "Preferential Origin", "No Preferential Origin",
+    "INVOICING"
+)
 
-    def flush():
-        nonlocal current
-        if current and current.get("Quantity") is not None:
-            current.setdefault("Code EAN","")
-            current.setdefault("Custom Code","")
-            current.setdefault("Origin","")
-            current.setdefault("Invoice Number",invoice_number)
-            rows.append(current.copy())
-        current=None
+def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict]:
+    rows: List[dict] = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            for line in (page.extract_text() or "").split("\n"):
-                line=line.strip()
-                if not line:
+            text = page.extract_text() or ""
+            # normaliza pequeñas dobles-espacios
+            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+
+            # recorre y cuando encuentre TOTALES, sube a buscar EAN/HS/HEAD
+            for i, ln in enumerate(lines):
+                mt = TOTAL_LINE_PAT.match(ln)
+                if not mt:
                     continue
 
-                # Cabecera de producto (ref al inicio)
-                if m:=HEAD_PAT.match(line):
-                    flush()
-                    current={
-                        "Reference": m.group("ref"),
-                        "Description": m.group("desc"),
-                        "Code EAN":"",
-                        "Custom Code":"",
-                        "Origin":"",
-                        "Quantity":None,
-                        "Unit Price":None,
-                        "Total Price":None,
-                        "Invoice Number":invoice_number,
-                    }
+                # 1) totales
+                qty  = int(mt.group("qty").replace(".","").replace(",",""))
+                unit = fnum(mt.group("unit"))
+                gross = fnum(mt.group("gross"))
+                total = fnum(mt.group("net")) if mt.group("net") else gross
+
+                # 2) ventana hacia arriba (5-8 líneas suelen bastar)
+                win_start = max(0, i-8)
+                window = lines[win_start:i]
+
+                ref = desc = ean = hs = org = ""
+
+                # Busca EAN y HS/Origin primero (pueden venir en cualquier orden)
+                for w in reversed(window):
+                    if not ean:
+                        me = EAN_PAT.search(w)
+                        if me: ean = me.group("ean")
+                    if not hs or not org:
+                        mh = HS_ORG_PAT.search(w)
+                        if mh:
+                            hs = mh.group("hs")
+                            org = mh.group("org")
+                    if ean and hs and org:
+                        break
+
+                # Busca cabecera válida inmediatamente por encima
+                for w in reversed(window):
+                    # evita líneas de metadatos
+                    if any(w.startswith(p) for p in BAD_HEAD_PREFIXES):
+                        continue
+                    mh = HEAD_CAND_PAT.match(w)
+                    if mh:
+                        ref  = mh.group("ref")
+                        desc = mh.group("desc").strip()
+                        break
+
+                # Si no encontró cabecera, intenta heurística: toma el primer token de la línea previa
+                if not ref and window:
+                    tokens = window[-1].split()
+                    if tokens:
+                        tok = tokens[0]
+                        if re.fullmatch(r"(?:[A-Z]{3}\d{3,6}[A-Z]?|\d{4,6}[A-Z]?)", tok):
+                            ref = tok
+                            desc = window[-1][len(tok):].strip()
+
+                # Si aún no hay ref/desc, omite (ruido)
+                if not ref or not desc:
                     continue
 
-                if not current:
-                    continue
+                rows.append({
+                    "Reference": ref,
+                    "Code EAN": ean,
+                    "Custom Code": hs,
+                    "Description": desc,
+                    "Origin": org,
+                    "Quantity": qty,
+                    "Unit Price": unit,
+                    "Total Price": total,
+                    "Invoice Number": invoice_number
+                })
 
-                # HS Code + Origin
-                if m:=HS_ORG_PAT.search(line):
-                    current["Custom Code"]=m.group("hs")
-                    current["Origin"]=m.group("org")
-                    continue
-
-                # EAN
-                if m:=EAN_PAT.search(line):
-                    current["Code EAN"]=m.group("ean")
-                    continue
-
-                # Totales
-                if m:=TOTAL_LINE_PAT.match(line):
-                    qty=int(m.group("qty").replace(".","").replace(",",""))
-                    unit=fnum(m.group("unit"))
-                    gross=fnum(m.group("gross"))
-                    total=fnum(m.group("net")) if m.group("net") else gross
-                    current["Quantity"]=qty
-                    current["Unit Price"]=unit
-                    current["Total Price"]=total
-                    flush()
-                    continue
-    flush()
     return rows
+
 
 # ───────────  COMPLEMENTO: detectar Invoice No. dentro del PDF  ─────────────
 INVNO_PAT = re.compile(r"Invoice\s+No\.\s*([A-Z0-9\-\/]+)", re.I)
