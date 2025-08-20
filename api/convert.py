@@ -45,7 +45,7 @@ ROW_PROF = re.compile(
 )
 
 def fnum(s: str) -> float:
-    return float(s.strip().replace(".", "").replace(",", ".")) if s.strip() else 0.0
+    return float(s.strip().replace(".", "").replace(",", ".")) if s and s.strip() else 0.0
 
 def doc_kind(text: str) -> str:
     up = text.upper()
@@ -335,10 +335,12 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
     return rows
 
 # ──────────────────  EXTRACTOR 4  (Interparfums Italia / “bloques”)  ────────
-HEAD_PAT = re.compile(r"^(?P<ref>[A-Z]{3}\w{3,})\s+(?P<desc>.+)$")
+# Cabecera: REF + DESCRIPCIÓN (a veces la misma línea incluye totales)
+HEAD_PAT = re.compile(r"^(?P<ref>[A-Z]{3}\w{3,})\s+(?P<desc>.+?)$")
 HS_ORG_PAT = re.compile(r"HS\s*Code:\s*(?P<hs>\d{8,14})\s*,\s*Origin:\s*(?P<org>[A-Z]{2})", re.I)
 EAN_PAT = re.compile(r"EAN\s*Code:\s*(?P<ean>\d{12,14})", re.I)
-# Línea de totales:  QTY PZ UNIT GROSS [DESC%] NET VAT
+
+# Totales en línea aparte (anclado al inicio)
 TOTAL_LINE_PAT = re.compile(
     r"""^
     (?P<qty>[\d\.]+)\s+PZ\s+
@@ -348,26 +350,37 @@ TOTAL_LINE_PAT = re.compile(
     \s+(?P<vat>[A-Z]{2})
     $""", re.X | re.I
 )
+# Totales "inline" (en cualquier parte de la línea)
+INLINE_TOTAL_PAT = re.compile(
+    r"""(?P<qty>[\d\.]+)\s+PZ\s+
+        (?P<unit>[\d\.,]+)\s+
+        (?P<gross>[\d\.,]+)
+        (?:\s+(?P<disc>-?\d+%)\s+(?P<net>[\d\.,]+))?
+        \s+(?P<vat>[A-Z]{2})\s*$""", re.X | re.I
+)
 
 def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict]:
     """
-    Lee bloques:
-      HEAD → HS/Origin → EAN → (Alcohol opcional) → TOTAL LINE
-    Devuelve filas con Total = NET (si existe) o GROSS si no hay descuento.
+    Lee bloques del estilo:
+      HEAD (puede traer totales inline) → HS/Origin → EAN → (Alcohol opcional) → (Totales si no fueron inline)
+    - Total = NET si existe, sino GROSS.
+    - Mantiene el bloque abierto tras leer totales para permitir HS/EAN posteriores.
     """
     rows: List[dict] = []
     current: dict | None = None
 
-    def flush_if_complete():
+    def flush_if_ready(force: bool = False):
         nonlocal current
         if not current:
             return
-        if all(k in current and current[k] not in ("", None) for k in ("Reference","Description","Quantity","Unit Price","Total Price")):
+        ready = all(current.get(k) not in (None, "") for k in ("Reference","Description","Quantity","Unit Price","Total Price"))
+        if ready or force:
             current.setdefault("Code EAN", "")
             current.setdefault("Custom Code", "")
             current.setdefault("Origin", "")
             current.setdefault("Invoice Number", invoice_number)
             rows.append(current.copy())
+            current = None
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -377,11 +390,20 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 if not line:
                     continue
 
-                # 1) nueva cabecera de producto
-                if m := HEAD_PAT.match(line):
-                    flush_if_complete()
-                    ref = m.group("ref").strip()
-                    desc = m.group("desc").strip()
+                # 1) Cabecera producto (puede traer totales inline)
+                mhead = HEAD_PAT.match(line)
+                if mhead:
+                    # Al ver una nueva cabecera, volcamos el bloque anterior si estaba completo
+                    flush_if_ready(force=False)
+
+                    ref = mhead.group("ref").strip()
+                    desc = mhead.group("desc").strip()
+
+                    # Si trae los totales inline, recortamos la descripción antes del match
+                    mt_inline = INLINE_TOTAL_PAT.search(line)
+                    if mt_inline:
+                        desc = line[mhead.start("desc"):mt_inline.start()].strip()
+
                     current = {
                         "Reference": ref,
                         "Description": desc,
@@ -393,12 +415,24 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                         "Total Price": None,
                         "Invoice Number": invoice_number,
                     }
+
+                    # Si hay totales inline, los tomamos aquí mismo (pero NO cerramos el bloque)
+                    if mt_inline:
+                        qty = int(mt_inline.group("qty").replace(".","").replace(",",""))
+                        unit = fnum(mt_inline.group("unit"))
+                        gross = fnum(mt_inline.group("gross"))
+                        net_s = mt_inline.group("net")
+                        total = fnum(net_s) if net_s is not None else gross
+                        current["Quantity"] = qty
+                        current["Unit Price"] = unit
+                        current["Total Price"] = total
                     continue
 
                 if not current:
+                    # Ignoramos cualquier otra cosa hasta ver cabecera
                     continue
 
-                # 2) HS+Origin
+                # 2) HS + Origin
                 if m2 := HS_ORG_PAT.search(line):
                     current["Custom Code"] = m2.group("hs")
                     current["Origin"] = m2.group("org")
@@ -409,33 +443,25 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                     current["Code EAN"] = m3.group("ean")
                     continue
 
-                # 4) Línea de totales (con o sin descuento)
-                if m4 := TOTAL_LINE_PAT.match(line):
-                    qty_s   = m4.group("qty")
-                    unit_s  = m4.group("unit")
-                    gross_s = m4.group("gross")
-                    net_s   = m4.group("net")  # None si no hay descuento
-
-                    qty = int(qty_s.replace(".","").replace(",",""))  # entero
-                    unit = fnum(unit_s)
-                    gross = fnum(gross_s)
+                # 4) Totales (en su propia línea o detectados como inline al final)
+                m4 = TOTAL_LINE_PAT.match(line) or INLINE_TOTAL_PAT.search(line)
+                if m4:
+                    qty = int(m4.group("qty").replace(".","").replace(",",""))
+                    unit = fnum(m4.group("unit"))
+                    gross = fnum(m4.group("gross"))
+                    net_s = m4.group("net")
                     total = fnum(net_s) if net_s is not None else gross
-
                     current["Quantity"] = qty
                     current["Unit Price"] = unit
                     current["Total Price"] = total
-
-                    # bloque listo
-                    flush_if_complete()
-                    current = None
+                    # No cerramos; dejamos que HS/EAN puedan venir después
                     continue
 
-                # 5) Alcohol y otras líneas → ignoradas
-                # Para concatenar descripción adicional, activar si lo necesitas:
-                # if re.search(r"[A-Za-z]", line) and not any(k in line for k in ("HS Code:", "EAN Code:", "Alcohol")):
-                #     current["Description"] += " " + line
+                # 5) Otras líneas (Alcohol %, etc.) → ignoradas
 
-    flush_if_complete()
+        # Al terminar todas las páginas, volcamos si está completo
+        flush_if_ready(force=False)
+
     return rows
 
 # ───────────  COMPLEMENTO: detectar Invoice No. dentro del PDF  ─────────────
@@ -452,7 +478,6 @@ def parse_invoice_number_from_pdf(pdf_path: str) -> str:
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
 def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
     """Rellena in-place cualquier fila sin HTS o UPC."""
-    # indexamos texto
     lines=[]
     with pdfplumber.open(pdf_path) as pdf:
         for pg in pdf.pages:
@@ -460,7 +485,7 @@ def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
             lines.extend(txt.split("\n"))
     lines=[re.sub(r"\s{2,}"," ",ln.strip()) for ln in lines if ln.strip()]
 
-    # mapa Reference → índice
+    # mapa Reference → índice aproximado
     ref_idx={}
     for idx,ln in enumerate(lines):
         m=re.match(r"^([A-Z0-9]{3,})\s+[A-Z]{3}\s",ln)
@@ -546,5 +571,6 @@ def convert():
 
 if __name__=="__main__":
     app.run(debug=True,host="0.0.0.0")
+
 
 
