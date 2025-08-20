@@ -424,62 +424,120 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 })
     return rows
 # ─────────────────────  EXTRACTOR 5 (COTY, robusto) ─────────────────────
-def _euro_num(s: str) -> float:
-    if not s:
-        return 0.0
-    t = s.replace("\u202f","").replace(" ","")
-    if t.count(",")==1:
-        t = t.replace(".","").replace(",",".")
-    else:
-        t = t.replace(",","")
-    try:
-        return float(t)
-    except:
-        return 0.0
+COTY_HEAD = re.compile(
+    r"^(?P<ref>\d{5,15})\s+(?:(?P<cust>\w+)\s+)?(?P<ean>\d{8,14})\s+(?P<desc>.+)$"
+)
+COTY_HS = re.compile(r"\(H\s*S\s*No\.\s*(?P<hs>\d{6,12})\)", re.I)
+COTY_ORG_EN = re.compile(r"Country of origin:\s*(?P<org>[A-Za-z\s]+)", re.I)
+COTY_ORG_ES = re.compile(r"Pa[ií]s de origen:\s*(?P<org>[A-Za-z\s]+)", re.I)
+COTY_TOTAL = re.compile(
+    r"""^\s*
+    (?P<qty>[\d\.\s,]+)\s+
+    (?P<unit>[\d\.,]+)\s+
+    (?P<total>[\d\.,]+)
+    (?P<stars>\*{1,2})?
+    \s*$""", re.X
+)
 
-def _qty_int(s: str) -> int:
-    return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
+def _coty_qty(txt: str) -> int:
+    return int(re.sub(r"[^\d]", "", txt) or 0)
+
+def _coty_num(txt: str) -> float:
+    if not txt: return 0.0
+    t = txt.replace(".", "").replace(",", ".")
+    try: return float(t)
+    except: return 0.0
+
+def _coty_iso2(name: str) -> str:
+    name = (name or "").strip().lower()
+    mapping = {
+        "france": "FR", "china": "CN", "italy": "IT", "spain": "ES",
+        "panama": "PA", "usa": "US", "united states": "US"
+    }
+    return mapping.get(name, name.upper()[:2])
 
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
     rows = []
-    with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages:
-            lines = (page.extract_text() or "").split("\n")
-            for ln in lines:
-                ln = ln.replace("\u202f", " ").strip()
-                if not ln or ln.lower().startswith("ref. no"):
-                    continue  # saltar cabecera
+    current = None
 
-                parts = ln.split()
-                if len(parts) < 6:
-                    continue
+    def flush():
+        nonlocal current
+        if not current:
+            return
+        current.setdefault("Customer Ref", "")
+        current.setdefault("Code EAN", "")
+        current.setdefault("Custom Code", "")
+        current.setdefault("Origin", "")
+        current.setdefault("Quantity", 0)
+        current.setdefault("Unit Price", 0.0)
+        current.setdefault("Total Price", 0.0)
+        current["Invoice Number"] = invoice_number
+        rows.append(current.copy())
+        current = None
 
-                try:
-                    ref = parts[0]
-                    cust = parts[1]
-                    ean = parts[2]
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            for page in pdf.pages:
+                text = page.extract_text() or ""
+                for ln in text.split("\n"):
+                    ln = ln.replace("\u202f", " ").strip()
+                    if not ln: 
+                        continue
 
-                    qty = _qty_int(parts[-2])
-                    price = _euro_num(parts[-1])
-                    total = round(qty * price, 2)
+                    # 1) Cabecera producto
+                    if (mh := COTY_HEAD.match(ln)):
+                        flush()
+                        gd = mh.groupdict()
+                        current = {
+                            "Reference": gd["ref"],
+                            "Customer Ref": gd.get("cust") or "",
+                            "Code EAN": gd["ean"],
+                            "Description": gd["desc"].strip(),
+                        }
+                        continue
 
-                    desc = " ".join(parts[3:-2])
+                    if not current:
+                        continue
 
-                    rows.append({
-                        "Reference": ref,
-                        "Customer Ref": cust,
-                        "Code EAN": ean,
-                        "Description": desc,
-                        "Quantity": qty,
-                        "Unit Price": price,
-                        "Total Price": total,
-                        "Custom Code": "",
-                        "Origin": "",
-                        "Invoice Number": invoice_number
-                    })
-                except Exception:
-                    continue
+                    # 2) HS Code
+                    if (mhs := COTY_HS.search(ln)):
+                        current["Custom Code"] = mhs.group("hs")
+
+                    # 3) Origen
+                    morg = COTY_ORG_EN.search(ln) or COTY_ORG_ES.search(ln)
+                    if morg:
+                        current["Origin"] = _coty_iso2(morg.group("org"))
+
+                    # 4) Totales
+                    if (mt := COTY_TOTAL.match(ln)):
+                        qty = _coty_qty(mt.group("qty"))
+                        unit = _coty_num(mt.group("unit"))
+                        total = _coty_num(mt.group("total"))
+                        if (mt.group("stars") or "") == "**":
+                            total = 0.0
+                        current["Quantity"] = qty
+                        current["Unit Price"] = unit
+                        current["Total Price"] = total
+                        flush()
+    except Exception as e:
+        logging.error(f"extract_coty error: {e}")
+
+    # fallback: nunca vacío → fila dummy
+    if not rows:
+        rows.append({
+            "Reference": "ERROR",
+            "Customer Ref": "",
+            "Code EAN": "",
+            "Description": "No se detectaron filas",
+            "Quantity": 0,
+            "Unit Price": 0.0,
+            "Total Price": 0.0,
+            "Custom Code": "",
+            "Origin": "",
+            "Invoice Number": invoice_number,
+        })
     return rows
+
 
 
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
