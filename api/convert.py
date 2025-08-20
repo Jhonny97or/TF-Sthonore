@@ -1,4 +1,4 @@
-# app.py  ── listo para Vercel o ejecución local J
+# app.py  ── listo para Vercel o ejecución local
 import logging
 import os
 import re
@@ -13,14 +13,32 @@ from flask import Flask, request, send_file
 from openpyxl import Workbook
 
 # ──────────────────────────────  CONFIG GLOBAL  ─────────────────────────────
-logging.basicConfig(level=logging.INFO,
-                    format="%(asctime)s %(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 app = Flask(__name__)
 
 COLS = [
     "Reference", "Code EAN", "Custom Code", "Description",
     "Origin", "Quantity", "Unit Price", "Total Price", "Invoice Number"
 ]
+
+# ───────────────  UTIL: sacar número de invoice del PDF  ───────────────
+INV_RE = re.compile(r"(?:INVOICE|FACTURE|FACTURA)\s*(?:NO\.?|N°|NUMBER)?\s*[:\-]?\s*(\w[\w\-\/]{4,})", re.I)
+SIP_RE = re.compile(r"\bSIP(\d{6,})\b", re.I)
+PO_RE  = re.compile(r"(?:ORDER|PO)\s*(?:NO\.?|N°|NUMBER)?\s*[:\-]?\s*(\w[\w\-\/]{4,})", re.I)
+
+def parse_invoice_number_from_pdf(pdf_path: str) -> str:
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            full = "\n".join((p.extract_text() or "") for p in pdf.pages)
+        if m := SIP_RE.search(full):
+            return m.group(1)
+        if m := INV_RE.search(full):
+            return m.group(1)
+        if m := PO_RE.search(full):
+            return m.group(1)
+    except Exception:
+        pass
+    return ""
 
 # ───────────────────────  PATRONES PARA CÓDIGOS  ────────────────────────────
 HTS_PAT = re.compile(r"^\d{6,10}$")
@@ -273,7 +291,6 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                 if not ln_s or ln_s.startswith(("No. Description","Invoice")):
                     continue
 
-                # 1) línea completa con HS
                 if m := pattern_full.match(ln):
                     d=m.groupdict()
                     rows.append({
@@ -290,7 +307,6 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                     pending_desc=None
                     continue
 
-                # 2) línea completa sin HS
                 if m2 := pattern_nohs.match(ln):
                     d=m2.groupdict()
                     rows.append({
@@ -307,7 +323,6 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                     pending_desc=None
                     continue
 
-                # 3) línea básica (solo números tras desc previa)
                 if mb := pattern_basic.match(ln):
                     if pending_desc:
                         d=mb.groupdict()
@@ -325,7 +340,6 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                         pending_desc=None
                     continue
 
-                # 4) acumular descripción multi-línea
                 if re.search(r"[A-Za-z]", ln_s):
                     skip_pref=("Country of","Customer PO","Order No",
                                "Shipping Terms","Bill To","Finance",
@@ -335,23 +349,20 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
     return rows
 
 # ──────────────────  EXTRACTOR 4 (Interparfums Italia: totales inline)  ─────
-# Cabecera + totales EN LA MISMA LÍNEA. Acepta:
-#   ... GROSS  NET  VA                (sin % de descuento)
-#   ... GROSS  -100% NET  VA         (con % de descuento)
 HS_ORG_PAT = re.compile(r"HS\s*Code:\s*(?P<hs>\d{8,14})\s*,\s*Origin:\s*(?P<org>[A-Z]{2})", re.I)
 EAN_PAT    = re.compile(r"EAN\s*Code:\s*(?P<ean>\d{12,14})", re.I)
 
 HEAD_INLINE_PAT = re.compile(
     r"""^
-    (?P<ref>[A-Z0-9]{3,}\w*)\s+              # referencia (JRC01003B / 63000 / etc.)
-    (?P<desc>.+?)\s+                         # descripción (no codiciosa)
-    (?P<qty>[\d\.\s]+)\s+PZ\s+               # cantidad (admite 1.000 o "1 000")
-    (?P<unit>[\d\.,]+)\s+                    # unit price
-    (?P<gross>[\d\.,]+)                      # gross amount
-    (?:\s+(?P<disc>-?\d+%)\s+(?P<net>[\d\.,]+)  # opcional: % desc + net
-       |\s+(?P<net2>[\d\.,]+)                # o bien: solo NET sin % (dos importes)
+    (?P<ref>[A-Z0-9]{3,}\w*)\s+
+    (?P<desc>.+?)\s+
+    (?P<qty>[\d\.\s]+)\s+PZ\s+
+    (?P<unit>[\d\.,]+)\s+
+    (?P<gross>[\d\.,]+)
+    (?:\s+(?P<disc>-?\d+%)\s+(?P<net>[\d\.,]+)
+       |\s+(?P<net2>[\d\.,]+)
     )
-    \s+(?P<vat>[A-Z]{2})\s*$                 # código VAT (VA)
+    \s+(?P<vat>[A-Z]{2})\s*$
     """,
     re.X | re.I
 )
@@ -359,11 +370,10 @@ HEAD_INLINE_PAT = re.compile(
 def _fnum_euro(s: str) -> float:
     if not s: return 0.0
     t = s.replace("\u202f","").replace(" ","")
-    # si hay coma como decimal, quita miles con punto
     if t.count(",")==1:
         t = t.replace(".","").replace(",",".")
     else:
-        t = t.replace(",","")  # asume punto decimal
+        t = t.replace(",","")
     try:
         return float(t)
     except:
@@ -381,7 +391,6 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 line = raw.strip()
                 if not line:
                     continue
-
                 m = HEAD_INLINE_PAT.match(line)
                 if not m:
                     continue
@@ -395,7 +404,6 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 net_s = gd.get("net") or gd.get("net2")
                 total = _fnum_euro(net_s) if net_s else gross
 
-                # Busca HS/Origin y EAN en las ~5 líneas siguientes
                 hs = org = ean = ""
                 lookahead = lines[i+1:i+6]
                 for w in lookahead:
@@ -423,29 +431,23 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                     "Invoice Number": invoice_number
                 })
     return rows
-# ─────────────────────  EXTRACTOR 5 (COTY, robusto) ─────────────────────
-import re
 
+# ─────────────────────  EXTRACTOR 5 (COTY, robusto) ─────────────────────
 # Cabeceras de tabla (ES/EN) y líneas que marcan fin de bloque
 _COTY_TABLE_HDR = re.compile(r"^(Ref\.\s*No\.|Ref\.\s*No\.\s*Customer|EAN\s*Code\s*Article|EAN\s*Code\s*Material)", re.I)
 _COTY_END_ROW   = re.compile(r"^(subtotal|total|carry\s*forward)", re.I)
 
 # Cabecera de ítem: Ref + EAN + descripción (en la misma línea)
-_COTY_HEAD = re.compile(
-    r"^\s*(?P<ref>\d{8,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+?)\s*$"
-)
+_COTY_HEAD = re.compile(r"^\s*(?P<ref>\d{8,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+?)\s*$")
 
 # Línea numérica: cantidad, unit price, total (a veces termina con * o **)
-_COTY_NUMS = re.compile(
-    r"^\s*(?P<qty>\d{1,6})\s+(?P<unit>[\d\.\,\s]+)\s+(?P<total>[\d\.\,]+)(?:\*+)?\s*$"
-)
+_COTY_NUMS = re.compile(r"^\s*(?P<qty>\d{1,6})\s+(?P<unit>[\d\.\,\s]+)\s+(?P<total>[\d\.\,]+)(?:\*+)?\s*$")
 
-# HS y Origen (ES/EN), en líneas entre cabecera y números
+# HS y Origen en líneas entre cabecera y números
 _COTY_HS    = re.compile(r"\(\s*H\s*S\s*No\.?\s*(?P<hs>\d{6,14})\s*\)", re.I)
 _COTY_ORGES = re.compile(r"Pa[ií]s\s+de\s+origen:\s*(?P<org>[A-Za-zÁÉÍÓÚÜÑ\s]+)", re.I)
 _COTY_ORGEN = re.compile(r"Country\s+of\s+origin:\s*(?P<org>[A-Za-zÁÉÍÓÚÜÑ\s]+)", re.I)
 
-# Ruido que no es parte de la descripción
 _SKIP_DESC_PREFIX = (
     "Cont. Total", "Alcohol", "Alc-Cont", "Net Weight", "Peso Neto",
     "L/","G", "CONT. TOTAL", "ALCOHOL", "ALCOHOL(VOC)",
@@ -467,13 +469,6 @@ def _coty_qty(s: str) -> int:
     return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
 
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
-    """
-    Soporta ambos layouts de COTY:
-    - ES: 'EAN Code Material Ctdad. Precio USD' (totales con '**' = gratis)
-    - EN: 'EAN Code Article Qty Price USD'
-    Cabecera 'ref + ean + desc' y, en otra línea, 'qty unit total'.
-    Entre medias pueden aparecer HS y Origen.
-    """
     rows: List[dict] = []
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
@@ -481,26 +476,22 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
             lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
 
             in_table = False
-            pending = None  # dict temporal de la fila en construcción
+            pending = None  # fila en construcción
 
             for ln in lines:
-                # Activa/Desactiva parsing por cabecera/fin
                 if _COTY_TABLE_HDR.match(ln):
                     in_table = True
                     continue
                 if not in_table:
                     continue
                 if _COTY_END_ROW.match(ln):
-                    # Cierra tabla de esta página/bloque
                     in_table = False
                     pending = None
                     continue
 
-                # 1) ¿Nueva cabecera de ítem?
                 mh = _COTY_HEAD.match(ln)
                 if mh:
                     gd = mh.groupdict()
-                    # Si había una fila pendiente sin números, la descartamos (incompleta)
                     pending = {
                         "Reference": gd["ref"],
                         "Code EAN": gd["ean"],
@@ -515,10 +506,8 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                     continue
 
                 if not pending:
-                    # Saltar cualquier cosa hasta ver cabecera válida
                     continue
 
-                # 2) ¿Línea de números (qty unit total)?
                 mn = _COTY_NUMS.match(ln)
                 if mn:
                     q = _coty_qty(mn.group("qty"))
@@ -531,7 +520,6 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                     pending = None
                     continue
 
-                # 3) HS / Origen si aparecen “entre medias”
                 if not pending.get("Custom Code"):
                     hs = _COTY_HS.search(ln)
                     if hs:
@@ -544,17 +532,13 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                     elif m_en:
                         pending["Origin"] = m_en.group("org").strip()
 
-                # 4) Acumular descripción multi-línea (filtrando ruido)
                 bad = any(ln.startswith(pref) for pref in _SKIP_DESC_PREFIX)
                 if not bad and not _COTY_TABLE_HDR.match(ln):
-                    # evita volver a meter líneas que claramente no son de la desc
                     if not _COTY_NUMS.match(ln) and not _COTY_END_ROW.match(ln):
-                        # evita reinsertar cabeceras de página
                         if not re.match(r"^(Ref\.\s*No\.|Page|P[aá]gina)", ln, re.I):
                             pending["Description"] = (pending["Description"] + " " + ln).strip()
 
     return rows
-
 
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
 def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
@@ -566,7 +550,7 @@ def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
             lines.extend(txt.split("\n"))
     lines=[re.sub(r"\s{2,}"," ",ln.strip()) for ln in lines if ln.strip()]
 
-    # mapa Reference → índice aproximado
+    # mapa Reference → índice aproximado (solo layouts con país abreviado)
     ref_idx={}
     for idx,ln in enumerate(lines):
         m=re.match(r"^([A-Z0-9]{3,})\s+[A-Z]{3}\s",ln)
@@ -612,12 +596,14 @@ def convert():
                 if not inv_num:
                     inv_num = parse_invoice_number_from_pdf(tmp.name)
 
-                # 1-4) extraemos con cada estrategia
-                rows1=extract_original(tmp.name)
-                rows2=extract_slice(tmp.name,inv_num)
-                rows3=extract_new_provider(tmp.name,inv_num)
-                rows4=extract_interparfums_blocks(tmp.name,inv_num)
-                rows5 = extract_coty(tmp.name, inv_num)   # ← NUEVO
+                logging.info("Procesando %s (inv=%s)", pdf.filename, inv_num)
+
+                # 1-5) extraemos con cada estrategia
+                rows1=extract_original(tmp.name);                         logging.info("r1=%d", len(rows1))
+                rows2=extract_slice(tmp.name,inv_num);                    logging.info("r2=%d", len(rows2))
+                rows3=extract_new_provider(tmp.name,inv_num);             logging.info("r3=%d", len(rows3))
+                rows4=extract_interparfums_blocks(tmp.name,inv_num);      logging.info("r4=%d", len(rows4))
+                rows5=extract_coty(tmp.name, inv_num);                    logging.info("r5=%d", len(rows5))
 
                 combo = rows1 + rows2 + rows3 + rows4 + rows5
 
@@ -653,6 +639,5 @@ def convert():
 
 if __name__=="__main__":
     app.run(debug=True,host="0.0.0.0")
-
 
 
