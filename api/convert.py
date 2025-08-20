@@ -433,30 +433,47 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
     return rows
 
 # ─────────────────────  EXTRACTOR 5 (COTY, robusto) ─────────────────────
-# Cabeceras de tabla (ES/EN) y líneas que marcan fin de bloque
-_COTY_TABLE_HDR = re.compile(r"^(Ref\.\s*No\.|Ref\.\s*No\.\s*Customer|EAN\s*Code\s*Article|EAN\s*Code\s*Material)", re.I)
+# Soporta:
+#  • ES: "Ref. No. / EAN Code Material Ctdad. Precio USD"
+#  • EN: "Ref. No. / EAN Code Article Qty Price USD"
+#  • Ítems en una sola línea:   ref  ean  desc  qty  unit  total
+#  • Ítems en dos líneas:       (cabecera) + (qty unit total)
+#  • Totales con * o ** (FOC)
+import re
+
+# Cabeceras de tabla y cortes
+_COTY_TABLE_HDR = re.compile(
+    r"^(Ref\.\s*No\.|Ref\.\s*No\.\s*Customer|EAN\s*Code\s*Article|EAN\s*Code\s*Material)",
+    re.I
+)
 _COTY_END_ROW   = re.compile(r"^(subtotal|total|carry\s*forward)", re.I)
 
-# Cabecera de ítem: Ref + EAN + descripción (en la misma línea)
-_COTY_HEAD = re.compile(r"^\s*(?P<ref>\d{8,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+?)\s*$")
-
-# Línea numérica: cantidad, unit price, total (a veces termina con * o **)
-_COTY_NUMS = re.compile(r"^\s*(?P<qty>\d{1,6})\s+(?P<unit>[\d\.\,\s]+)\s+(?P<total>[\d\.\,]+)(?:\*+)?\s*$")
-
-# HS y Origen en líneas entre cabecera y números
-_COTY_HS    = re.compile(r"\(\s*H\s*S\s*No\.?\s*(?P<hs>\d{6,14})\s*\)", re.I)
-_COTY_ORGES = re.compile(r"Pa[ií]s\s+de\s+origen:\s*(?P<org>[A-Za-zÁÉÍÓÚÜÑ\s]+)", re.I)
-_COTY_ORGEN = re.compile(r"Country\s+of\s+origin:\s*(?P<org>[A-Za-zÁÉÍÓÚÜÑ\s]+)", re.I)
-
-_SKIP_DESC_PREFIX = (
-    "Cont. Total", "Alcohol", "Alc-Cont", "Net Weight", "Peso Neto",
-    "L/","G", "CONT. TOTAL", "ALCOHOL", "ALCOHOL(VOC)",
+# Una sola línea con todo (ref/ean/desc/qty/unit/total)
+_COTY_ONE_LINE = re.compile(
+    r"^\s*(?P<ref>\d{8,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+?)\s+"
+    r"(?P<qty>\d{1,6})\s+(?P<unit>[\d\.,\s]+?)\s+(?P<total>[\d\.,]+)(?:\*+)?\s*$"
 )
 
+# Variante en dos líneas: primero solo cabecera ref/ean/desc…
+_COTY_HEAD_ONLY = re.compile(
+    r"^\s*(?P<ref>\d{8,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+?)\s*$"
+)
+
+# …y después cantidades/precio/total
+_COTY_NUMS = re.compile(
+    r"^\s*(?P<qty>\d{1,6})\s+(?P<unit>[\d\.\,\s]+)\s+(?P<total>[\d\.,]+)(?:\*+)?\s*$"
+)
+
+# HS y Origen (pueden aparecer entre cabecera y números, o tras la línea completa)
+_COTY_HS    = re.compile(r"\(\s*H\s*S\s*No\.?\s*(?P<hs>\d{6,14})\s*\)", re.I)
+_COTY_ORGES = re.compile(r"Pa[ií]s\s+de\s+origen:\s*(?P<org>.+)", re.I)
+_COTY_ORGEN = re.compile(r"Country\s+of\s+origin:\s*(?P<org>.+)", re.I)
+
 def _coty_num(s: str) -> float:
-    if not s: return 0.0
-    t = s.replace("\u202f","").replace(" ", "")
-    if t.count(",") == 1 and t.count(".") <= 1:
+    if not s:
+        return 0.0
+    t = s.replace("\u202f", "").replace(" ", "")
+    if t.count(",") == 1:
         t = t.replace(".", "").replace(",", ".")
     else:
         t = t.replace(",", "")
@@ -470,75 +487,98 @@ def _coty_qty(s: str) -> int:
 
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
     rows: List[dict] = []
+    LOOKAHEAD = 10  # líneas a mirar para HS/Origen después de detectar un ítem
+
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text = page.extract_text(x_tolerance=1.2) or ""
-            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
-
+            lines = [ln.strip() for ln in (page.extract_text(x_tolerance=1.2) or "").split("\n") if ln.strip()]
             in_table = False
-            pending = None  # fila en construcción
+            i = 0
 
-            for ln in lines:
+            while i < len(lines):
+                ln = lines[i]
+
+                # entrar/salir de tabla
                 if _COTY_TABLE_HDR.match(ln):
                     in_table = True
+                    i += 1
                     continue
                 if not in_table:
+                    i += 1
                     continue
                 if _COTY_END_ROW.match(ln):
                     in_table = False
-                    pending = None
+                    i += 1
                     continue
 
-                mh = _COTY_HEAD.match(ln)
-                if mh:
-                    gd = mh.groupdict()
-                    pending = {
+                # 1) caso "una sola línea"
+                m1 = _COTY_ONE_LINE.match(ln)
+                if m1:
+                    gd = m1.groupdict()
+                    # busca HS/Origen en las siguientes N líneas
+                    hs = ""
+                    org = ""
+                    for w in lines[i+1:i+1+LOOKAHEAD]:
+                        if not hs:
+                            mh = _COTY_HS.search(w)
+                            if mh: hs = mh.group("hs")
+                        if not org:
+                            mo = _COTY_ORGES.search(w) or _COTY_ORGEN.search(w)
+                            if mo: org = mo.group("org").strip()
+                        if hs and org:
+                            break
+
+                    rows.append({
                         "Reference": gd["ref"],
                         "Code EAN": gd["ean"],
-                        "Description": gd["desc"].strip(),
-                        "Custom Code": "",
-                        "Origin": "",
-                        "Quantity": 0,
-                        "Unit Price": 0.0,
-                        "Total Price": 0.0,
+                        "Custom Code": hs,
+                        "Description": gd["desc"],
+                        "Origin": org,
+                        "Quantity": _coty_qty(gd["qty"]),
+                        "Unit Price": _coty_num(gd["unit"]),
+                        "Total Price": _coty_num(gd["total"]),
                         "Invoice Number": invoice_number
-                    }
+                    })
+                    i += 1
                     continue
 
-                if not pending:
+                # 2) caso "dos líneas": cabecera + línea numérica
+                mh = _COTY_HEAD_ONLY.match(ln)
+                if mh and i + 1 < len(lines) and _COTY_NUMS.match(lines[i+1]):
+                    gd = mh.groupdict()
+                    mn = _COTY_NUMS.match(lines[i+1])
+
+                    hs = ""
+                    org = ""
+                    for w in lines[i+2:i+2+LOOKAHEAD]:
+                        if not hs:
+                            mh2 = _COTY_HS.search(w)
+                            if mh2: hs = mh2.group("hs")
+                        if not org:
+                            mo2 = _COTY_ORGES.search(w) or _COTY_ORGEN.search(w)
+                            if mo2: org = mo2.group("org").strip()
+                        if hs and org:
+                            break
+
+                    rows.append({
+                        "Reference": gd["ref"],
+                        "Code EAN": gd["ean"],
+                        "Custom Code": hs,
+                        "Description": gd["desc"],
+                        "Origin": org,
+                        "Quantity": _coty_qty(mn.group("qty")),
+                        "Unit Price": _coty_num(mn.group("unit")),
+                        "Total Price": _coty_num(mn.group("total")),
+                        "Invoice Number": invoice_number
+                    })
+                    i += 2
                     continue
 
-                mn = _COTY_NUMS.match(ln)
-                if mn:
-                    q = _coty_qty(mn.group("qty"))
-                    u = _coty_num(mn.group("unit"))
-                    t = _coty_num(mn.group("total"))
-                    pending["Quantity"]   = q
-                    pending["Unit Price"] = u
-                    pending["Total Price"] = t
-                    rows.append(pending)
-                    pending = None
-                    continue
-
-                if not pending.get("Custom Code"):
-                    hs = _COTY_HS.search(ln)
-                    if hs:
-                        pending["Custom Code"] = hs.group("hs")
-                if not pending.get("Origin"):
-                    m_es = _COTY_ORGES.search(ln)
-                    m_en = _COTY_ORGEN.search(ln) if not m_es else None
-                    if m_es:
-                        pending["Origin"] = m_es.group("org").strip()
-                    elif m_en:
-                        pending["Origin"] = m_en.group("org").strip()
-
-                bad = any(ln.startswith(pref) for pref in _SKIP_DESC_PREFIX)
-                if not bad and not _COTY_TABLE_HDR.match(ln):
-                    if not _COTY_NUMS.match(ln) and not _COTY_END_ROW.match(ln):
-                        if not re.match(r"^(Ref\.\s*No\.|Page|P[aá]gina)", ln, re.I):
-                            pending["Description"] = (pending["Description"] + " " + ln).strip()
+                # si no hizo match, sigue
+                i += 1
 
     return rows
+
 
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
 def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
