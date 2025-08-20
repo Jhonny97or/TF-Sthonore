@@ -334,6 +334,121 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                         pending_desc=(pending_desc+" "+ln_s) if pending_desc else ln_s
     return rows
 
+# ──────────────────  EXTRACTOR 4  (Interparfums Italia / “bloques”)  ────────
+HEAD_PAT = re.compile(r"^(?P<ref>[A-Z]{3}\w{3,})\s+(?P<desc>.+)$")
+HS_ORG_PAT = re.compile(r"HS\s*Code:\s*(?P<hs>\d{8,14})\s*,\s*Origin:\s*(?P<org>[A-Z]{2})", re.I)
+EAN_PAT = re.compile(r"EAN\s*Code:\s*(?P<ean>\d{12,14})", re.I)
+# Línea de totales:  QTY PZ UNIT GROSS [DESC%] NET VAT
+TOTAL_LINE_PAT = re.compile(
+    r"""^
+    (?P<qty>[\d\.]+)\s+PZ\s+
+    (?P<unit>[\d\.,]+)\s+
+    (?P<gross>[\d\.,]+)
+    (?:\s+(?P<disc>-?\d+%)\s+(?P<net>[\d\.,]+))?
+    \s+(?P<vat>[A-Z]{2})
+    $""", re.X | re.I
+)
+
+def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict]:
+    """
+    Lee bloques:
+      HEAD → HS/Origin → EAN → (Alcohol opcional) → TOTAL LINE
+    Devuelve filas con Total = NET (si existe) o GROSS si no hay descuento.
+    """
+    rows: List[dict] = []
+    current: dict | None = None
+
+    def flush_if_complete():
+        nonlocal current
+        if not current:
+            return
+        if all(k in current and current[k] not in ("", None) for k in ("Reference","Description","Quantity","Unit Price","Total Price")):
+            current.setdefault("Code EAN", "")
+            current.setdefault("Custom Code", "")
+            current.setdefault("Origin", "")
+            current.setdefault("Invoice Number", invoice_number)
+            rows.append(current.copy())
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""
+            for raw in txt.split("\n"):
+                line = raw.strip()
+                if not line:
+                    continue
+
+                # 1) nueva cabecera de producto
+                if m := HEAD_PAT.match(line):
+                    flush_if_complete()
+                    ref = m.group("ref").strip()
+                    desc = m.group("desc").strip()
+                    current = {
+                        "Reference": ref,
+                        "Description": desc,
+                        "Code EAN": "",
+                        "Custom Code": "",
+                        "Origin": "",
+                        "Quantity": None,
+                        "Unit Price": None,
+                        "Total Price": None,
+                        "Invoice Number": invoice_number,
+                    }
+                    continue
+
+                if not current:
+                    continue
+
+                # 2) HS+Origin
+                if m2 := HS_ORG_PAT.search(line):
+                    current["Custom Code"] = m2.group("hs")
+                    current["Origin"] = m2.group("org")
+                    continue
+
+                # 3) EAN
+                if m3 := EAN_PAT.search(line):
+                    current["Code EAN"] = m3.group("ean")
+                    continue
+
+                # 4) Línea de totales (con o sin descuento)
+                if m4 := TOTAL_LINE_PAT.match(line):
+                    qty_s   = m4.group("qty")
+                    unit_s  = m4.group("unit")
+                    gross_s = m4.group("gross")
+                    net_s   = m4.group("net")  # None si no hay descuento
+
+                    qty = int(qty_s.replace(".","").replace(",",""))  # entero
+                    unit = fnum(unit_s)
+                    gross = fnum(gross_s)
+                    total = fnum(net_s) if net_s is not None else gross
+
+                    current["Quantity"] = qty
+                    current["Unit Price"] = unit
+                    current["Total Price"] = total
+
+                    # bloque listo
+                    flush_if_complete()
+                    current = None
+                    continue
+
+                # 5) Alcohol y otras líneas → ignoradas
+                # Para concatenar descripción adicional, activar si lo necesitas:
+                # if re.search(r"[A-Za-z]", line) and not any(k in line for k in ("HS Code:", "EAN Code:", "Alcohol")):
+                #     current["Description"] += " " + line
+
+    flush_if_complete()
+    return rows
+
+# ───────────  COMPLEMENTO: detectar Invoice No. dentro del PDF  ─────────────
+INVNO_PAT = re.compile(r"Invoice\s+No\.\s*([A-Z0-9\-\/]+)", re.I)
+
+def parse_invoice_number_from_pdf(pdf_path: str) -> str:
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            txt = page.extract_text() or ""
+            if m := INVNO_PAT.search(txt):
+                return m.group(1).strip()
+    return ""
+
 # ────────────────  COMPLEMENTO: llenar HTS / UPC faltantes  ────────────────
 def complete_missing_codes(pdf_path: str, rows: List[dict]) -> None:
     """Rellena in-place cualquier fila sin HTS o UPC."""
@@ -385,14 +500,20 @@ def convert():
         for pdf in pdfs:
             with tempfile.NamedTemporaryFile(delete=False,suffix=".pdf") as tmp:
                 pdf.save(tmp.name)
-                inv_num=(m.group(1) if (m:=re.search(r"SIP(\d+)", pdf.filename or "")) else "")
 
-                # 1-3) extraemos con cada estrategia
+                # 1) intenta desde el nombre (SIP…), 2) si no, desde el PDF (Invoice No.)
+                inv_num=(m.group(1) if (m:=re.search(r"SIP(\d+)", pdf.filename or "")) else "")
+                if not inv_num:
+                    inv_num = parse_invoice_number_from_pdf(tmp.name)
+
+                # 1-4) extraemos con cada estrategia
                 rows1=extract_original(tmp.name)
                 rows2=extract_slice(tmp.name,inv_num)
                 rows3=extract_new_provider(tmp.name,inv_num)
+                rows4=extract_interparfums_blocks(tmp.name,inv_num)
 
-                combo=rows1+rows2+rows3
+                combo=rows1+rows2+rows3+rows4
+
                 # eliminar duplicados por (Reference, EAN, Invoice)
                 seen=set(); uniq=[]
                 for r in combo:
@@ -411,7 +532,7 @@ def convert():
 
         wb=Workbook(); ws=wb.active; ws.append(COLS)
         for r in all_rows:
-            ws.append([r[c] for c in COLS])
+            ws.append([r.get(c, "") for c in COLS])
         buf=BytesIO(); wb.save(buf); buf.seek(0)
         return send_file(
             buf,
