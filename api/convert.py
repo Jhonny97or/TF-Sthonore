@@ -27,18 +27,45 @@ SIP_RE = re.compile(r"\bSIP(\d{6,})\b", re.I)
 PO_RE  = re.compile(r"(?:ORDER|PO)\s*(?:NO\.?|N°|NUMBER)?\s*[:\-]?\s*(\w[\w\-\/]{4,})", re.I)
 
 def parse_invoice_number_from_pdf(pdf_path: str) -> str:
+    def _clean(tok: str) -> str:
+        return re.sub(r"(^[^A-Z0-9]+|[^A-Z0-9\/\-]+$)", "", tok.strip(), flags=re.I)
+
+    def _valid(tok: str) -> bool:
+        if not tok:
+            return False
+        if re.fullmatch(r"fech[aá]?", tok, flags=re.I):  # evita FECHA
+            return False
+        return any(ch.isdigit() for ch in tok) and len(tok) >= 4
+
     try:
         with pdfplumber.open(pdf_path) as pdf:
             full = "\n".join((p.extract_text() or "") for p in pdf.pages)
-        if m := SIP_RE.search(full):
-            return m.group(1)
-        if m := INV_RE.search(full):
-            return m.group(1)
-        if m := PO_RE.search(full):
-            return m.group(1)
+        lines = [ln.strip() for ln in full.split("\n") if ln.strip()]
+
+        hdr_pat = re.compile(r"(INVOICE|FACTURA|FACTURE)", re.I)
+        no_pat  = re.compile(r"(?:No\.?|N°|Number|Num\.?)\s*[:\-]?\s*(\S+)", re.I)
+        for ln in lines:
+            if not hdr_pat.search(ln):
+                continue
+            m = no_pat.search(ln)
+            if m:
+                cand = _clean(m.group(1))
+                if _valid(cand):
+                    return cand
+            for tok in re.split(r"\s+", ln):
+                tokc = _clean(tok)
+                if _valid(tokc):
+                    return tokc
+
+        m = re.search(r"(?:INVOICE|FACTURA|FACTURE)[^\n]{0,40}?([A-Z]*\d[\w\-\/]*)", full, re.I)
+        if m:
+            cand = _clean(m.group(1))
+            if _valid(cand):
+                return cand
     except Exception:
         pass
     return ""
+
 
 # ───────────────────────  PATRONES PARA CÓDIGOS  ────────────────────────────
 HTS_PAT = re.compile(r"^\d{6,10}$")
