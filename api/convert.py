@@ -424,6 +424,22 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 })
     return rows
 # ─────────────────────  EXTRACTOR 5 (COTY, robusto) ─────────────────────
+def _euro_num(s: str) -> float:
+    if not s:
+        return 0.0
+    t = s.replace("\u202f","").replace(" ","")
+    if t.count(",")==1:
+        t = t.replace(".","").replace(",",".")
+    else:
+        t = t.replace(",","")
+    try:
+        return float(t)
+    except:
+        return 0.0
+
+def _qty_int(s: str) -> int:
+    return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
+
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
     rows = []
     with pdfplumber.open(pdf_path) as pdf:
@@ -436,7 +452,7 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
 
                 parts = ln.split()
                 if len(parts) < 6:
-                    continue  # no tiene suficientes columnas
+                    continue
 
                 try:
                     ref = parts[0]
@@ -462,7 +478,6 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                         "Invoice Number": invoice_number
                     })
                 except Exception:
-                    # si hay líneas que no cuadran, se ignoran
                     continue
     return rows
 
