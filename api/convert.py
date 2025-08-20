@@ -423,6 +423,127 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                     "Invoice Number": invoice_number
                 })
     return rows
+# ─────────────────────  EXTRACTOR 5  (COTY)  ─────────────────────
+# Cabecera: "RefNo  EAN  Article ..."
+COTY_HEAD = re.compile(
+    r"^(?P<ref>\d{6,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+)$"
+)
+
+# HS/Origen (inglés y español)
+COTY_HS = re.compile(r"\(H\s*S\s*No\.\s*(?P<hs>\d{6,12})\)", re.I)
+COTY_ORG_EN = re.compile(r"Country of origin:\s*(?P<org>[A-Za-z\s]+)", re.I)
+COTY_ORG_ES = re.compile(r"Pa[ií]s de origen:\s*(?P<org>[A-Za-z\s]+)", re.I)
+
+# Totales (Qty Unit Total) con posibles * / ** al final
+COTY_TOTAL = re.compile(
+    r"""^\s*
+    (?P<qty>[\d\.\s]+)\s+                 # cantidad (1.000 o "1 000")
+    (?P<unit>[\d\.,]+)\s+                 # unit price
+    (?P<total>[\d\.,]+)                   # total
+    (?P<stars>\*{1,2})?                   # * (no-UE) o ** (gratis)
+    \s*$""", re.X
+)
+
+ISO2 = {
+    "france":"FR","francia":"FR",
+    "spain":"ES","españa":"ES","espana":"ES",
+    "china":"CN",
+    "italy":"IT","italia":"IT",
+    "germany":"DE","alemania":"DE",
+    "united states":"US","usa":"US","estados unidos":"US",
+    "portugal":"PT","poland":"PL","fr":"FR","es":"ES","cn":"CN","it":"IT","de":"DE","us":"US"
+}
+
+def _euro_num(s: str) -> float:
+    if not s: return 0.0
+    t = s.replace("\u202f","").replace(" ","")
+    if t.count(",")==1:
+        t = t.replace(".","").replace(",",".")
+    else:
+        t = t.replace(",","")
+    try: return float(t)
+    except: return 0.0
+
+def _qty_int(s: str) -> int:
+    return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
+
+def _to_iso2(country: str) -> str:
+    k = (country or "").strip().lower()
+    return ISO2.get(k, country[:2].upper() if country else "")
+
+def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
+    rows = []
+    current = None
+
+    def flush():
+        nonlocal current
+        if not current:
+            return
+        if current.get("Quantity") is not None and current.get("Unit Price") is not None:
+            current.setdefault("Custom Code","")
+            current.setdefault("Code EAN","")
+            current.setdefault("Origin","")
+            current.setdefault("Invoice Number", invoice_number)
+            rows.append(current.copy())
+        current = None
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            # normaliza NBSP
+            lines = [ln.replace("\u202f"," ").strip() for ln in text.split("\n") if ln.strip()]
+            i = 0
+            while i < len(lines):
+                ln = lines[i]
+
+                # 1) Cabecera
+                mh = COTY_HEAD.match(ln)
+                if mh:
+                    flush()
+                    gd = mh.groupdict()
+                    current = {
+                        "Reference": gd["ref"],
+                        "Code EAN": gd["ean"],
+                        "Description": gd["desc"].strip(),
+                        "Custom Code": "",
+                        "Origin": "",
+                        "Quantity": None,
+                        "Unit Price": None,
+                        "Total Price": None,
+                        "Invoice Number": invoice_number
+                    }
+                    i += 1
+                    continue
+
+                if not current:
+                    i += 1
+                    continue
+
+                # 2) HS dentro de paréntesis
+                if (mhs := COTY_HS.search(ln)):
+                    current["Custom Code"] = mhs.group("hs")
+
+                # 3) Country of origin / País de origen
+                morg = COTY_ORG_EN.search(ln) or COTY_ORG_ES.search(ln)
+                if morg:
+                    current["Origin"] = _to_iso2(morg.group("org"))
+
+                # 4) Línea de totales
+                mt = COTY_TOTAL.match(ln)
+                if mt:
+                    qty = _qty_int(mt.group("qty"))
+                    unit = _euro_num(mt.group("unit"))
+                    total = _euro_num(mt.group("total"))
+                    stars = (mt.group("stars") or "")
+                    # En facturas ES: ** = Gratis → total 0
+                    if stars == "**":
+                        total = 0.0
+                    current["Quantity"] = qty
+                    current["Unit Price"] = unit
+                    current["Total Price"] = total
+                    flush()
+                i += 1
+    return rows
 
 
 
@@ -498,8 +619,9 @@ def convert():
                 rows2=extract_slice(tmp.name,inv_num)
                 rows3=extract_new_provider(tmp.name,inv_num)
                 rows4=extract_interparfums_blocks(tmp.name,inv_num)
+                rows5 = extract_coty(tmp.name, inv_num)   # ← NUEVO
 
-                combo=rows1+rows2+rows3+rows4
+                combo = rows1 + rows2 + rows3 + rows4 + rows5
 
                 # eliminar duplicados por (Reference, EAN, Invoice)
                 seen=set(); uniq=[]
