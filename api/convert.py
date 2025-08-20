@@ -335,12 +335,9 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
     return rows
 
 # ──────────────────  EXTRACTOR 4  (Interparfums Italia / “bloques”)  ────────
-# Cabecera: REF + DESCRIPCIÓN (a veces la misma línea incluye totales)
-HEAD_PAT = re.compile(r"^(?P<ref>[A-Z]{3}\w{3,})\s+(?P<desc>.+?)$")
+HEAD_PAT = re.compile(r"^(?P<ref>(?:JRC|JFE|JUG|INV|[A-Z0-9]{3,6}))\w*\s+(?P<desc>.+)$")
 HS_ORG_PAT = re.compile(r"HS\s*Code:\s*(?P<hs>\d{8,14})\s*,\s*Origin:\s*(?P<org>[A-Z]{2})", re.I)
 EAN_PAT = re.compile(r"EAN\s*Code:\s*(?P<ean>\d{12,14})", re.I)
-
-# Totales en línea aparte (anclado al inicio)
 TOTAL_LINE_PAT = re.compile(
     r"""^
     (?P<qty>[\d\.]+)\s+PZ\s+
@@ -350,118 +347,70 @@ TOTAL_LINE_PAT = re.compile(
     \s+(?P<vat>[A-Z]{2})
     $""", re.X | re.I
 )
-# Totales "inline" (en cualquier parte de la línea)
-INLINE_TOTAL_PAT = re.compile(
-    r"""(?P<qty>[\d\.]+)\s+PZ\s+
-        (?P<unit>[\d\.,]+)\s+
-        (?P<gross>[\d\.,]+)
-        (?:\s+(?P<disc>-?\d+%)\s+(?P<net>[\d\.,]+))?
-        \s+(?P<vat>[A-Z]{2})\s*$""", re.X | re.I
-)
 
 def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict]:
-    """
-    Lee bloques del estilo:
-      HEAD (puede traer totales inline) → HS/Origin → EAN → (Alcohol opcional) → (Totales si no fueron inline)
-    - Total = NET si existe, sino GROSS.
-    - Mantiene el bloque abierto tras leer totales para permitir HS/EAN posteriores.
-    """
-    rows: List[dict] = []
-    current: dict | None = None
+    rows=[]
+    current=None
 
-    def flush_if_ready(force: bool = False):
+    def flush():
         nonlocal current
-        if not current:
-            return
-        ready = all(current.get(k) not in (None, "") for k in ("Reference","Description","Quantity","Unit Price","Total Price"))
-        if ready or force:
-            current.setdefault("Code EAN", "")
-            current.setdefault("Custom Code", "")
-            current.setdefault("Origin", "")
-            current.setdefault("Invoice Number", invoice_number)
+        if current and current.get("Quantity") is not None:
+            current.setdefault("Code EAN","")
+            current.setdefault("Custom Code","")
+            current.setdefault("Origin","")
+            current.setdefault("Invoice Number",invoice_number)
             rows.append(current.copy())
-            current = None
+        current=None
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            txt = page.extract_text() or ""
-            for raw in txt.split("\n"):
-                line = raw.strip()
+            for line in (page.extract_text() or "").split("\n"):
+                line=line.strip()
                 if not line:
                     continue
 
-                # 1) Cabecera producto (puede traer totales inline)
-                mhead = HEAD_PAT.match(line)
-                if mhead:
-                    # Al ver una nueva cabecera, volcamos el bloque anterior si estaba completo
-                    flush_if_ready(force=False)
-
-                    ref = mhead.group("ref").strip()
-                    desc = mhead.group("desc").strip()
-
-                    # Si trae los totales inline, recortamos la descripción antes del match
-                    mt_inline = INLINE_TOTAL_PAT.search(line)
-                    if mt_inline:
-                        desc = line[mhead.start("desc"):mt_inline.start()].strip()
-
-                    current = {
-                        "Reference": ref,
-                        "Description": desc,
-                        "Code EAN": "",
-                        "Custom Code": "",
-                        "Origin": "",
-                        "Quantity": None,
-                        "Unit Price": None,
-                        "Total Price": None,
-                        "Invoice Number": invoice_number,
+                # Cabecera de producto (ref al inicio)
+                if m:=HEAD_PAT.match(line):
+                    flush()
+                    current={
+                        "Reference": m.group("ref"),
+                        "Description": m.group("desc"),
+                        "Code EAN":"",
+                        "Custom Code":"",
+                        "Origin":"",
+                        "Quantity":None,
+                        "Unit Price":None,
+                        "Total Price":None,
+                        "Invoice Number":invoice_number,
                     }
-
-                    # Si hay totales inline, los tomamos aquí mismo (pero NO cerramos el bloque)
-                    if mt_inline:
-                        qty = int(mt_inline.group("qty").replace(".","").replace(",",""))
-                        unit = fnum(mt_inline.group("unit"))
-                        gross = fnum(mt_inline.group("gross"))
-                        net_s = mt_inline.group("net")
-                        total = fnum(net_s) if net_s is not None else gross
-                        current["Quantity"] = qty
-                        current["Unit Price"] = unit
-                        current["Total Price"] = total
                     continue
 
                 if not current:
-                    # Ignoramos cualquier otra cosa hasta ver cabecera
                     continue
 
-                # 2) HS + Origin
-                if m2 := HS_ORG_PAT.search(line):
-                    current["Custom Code"] = m2.group("hs")
-                    current["Origin"] = m2.group("org")
+                # HS Code + Origin
+                if m:=HS_ORG_PAT.search(line):
+                    current["Custom Code"]=m.group("hs")
+                    current["Origin"]=m.group("org")
                     continue
 
-                # 3) EAN
-                if m3 := EAN_PAT.search(line):
-                    current["Code EAN"] = m3.group("ean")
+                # EAN
+                if m:=EAN_PAT.search(line):
+                    current["Code EAN"]=m.group("ean")
                     continue
 
-                # 4) Totales (en su propia línea o detectados como inline al final)
-                m4 = TOTAL_LINE_PAT.match(line) or INLINE_TOTAL_PAT.search(line)
-                if m4:
-                    qty = int(m4.group("qty").replace(".","").replace(",",""))
-                    unit = fnum(m4.group("unit"))
-                    gross = fnum(m4.group("gross"))
-                    net_s = m4.group("net")
-                    total = fnum(net_s) if net_s is not None else gross
-                    current["Quantity"] = qty
-                    current["Unit Price"] = unit
-                    current["Total Price"] = total
-                    # No cerramos; dejamos que HS/EAN puedan venir después
+                # Totales
+                if m:=TOTAL_LINE_PAT.match(line):
+                    qty=int(m.group("qty").replace(".","").replace(",",""))
+                    unit=fnum(m.group("unit"))
+                    gross=fnum(m.group("gross"))
+                    total=fnum(m.group("net")) if m.group("net") else gross
+                    current["Quantity"]=qty
+                    current["Unit Price"]=unit
+                    current["Total Price"]=total
+                    flush()
                     continue
-
-                # 5) Otras líneas (Alcohol %, etc.) → ignoradas
-
-        # Al terminar todas las páginas, volcamos si está completo
-        flush_if_ready(force=False)
-
+    flush()
     return rows
 
 # ───────────  COMPLEMENTO: detectar Invoice No. dentro del PDF  ─────────────
