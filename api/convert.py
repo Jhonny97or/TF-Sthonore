@@ -773,7 +773,7 @@ def convert():
                 rows3=extract_new_provider(tmp.name,inv_num);             logging.info("r3=%d", len(rows3))
                 rows4=extract_interparfums_blocks(tmp.name,inv_num);      logging.info("r4=%d", len(rows4))
                 rows5=extract_coty(tmp.name, inv_num);                    logging.info("r5=%d", len(rows5))
-                rows6=extract_bulgari_asn(tmp.name, inv_num);             logging.info("r6=%d", len(rows6)
+                rows6=extract_bulgari_asn(tmp.name, inv_num);             logging.info("r6=%d", len(rows6))
 
                 combo = rows1 + rows2 + rows3 + rows4 + rows5 + rows6
                 # eliminar duplicados por (Reference, EAN, Invoice)
