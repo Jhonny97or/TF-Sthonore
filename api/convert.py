@@ -334,15 +334,13 @@ def extract_new_provider(pdf_path: str, inv_number: str) -> List[dict]:
                         pending_desc=(pending_desc+" "+ln_s) if pending_desc else ln_s
     return rows
 
-# ──────────────────  EXTRACTOR 4 v3 (Interparfums por ventana)  ─────────────
-HEAD_CAND_PAT = re.compile(
-    r"^(?P<ref>(?:[A-Z]{3}\d{3,6}[A-Z]?|\d{4,6}[A-Z]?))\s+(?P<desc>.+)$"
-)
+# ──────────────────  EXTRACTOR 4 v4 (anclado en EAN Code)  ──────────────────
+HEAD_PAT = re.compile(r"^(?P<ref>(?:[A-Z]{3}\d{3,6}[A-Z]?|\d{4,6}[A-Z]?))\s+(?P<desc>.+)$")
 HS_ORG_PAT = re.compile(r"HS\s*Code:\s*(?P<hs>\d{8,14})\s*,\s*Origin:\s*(?P<org>[A-Z]{2})", re.I)
 EAN_PAT = re.compile(r"EAN\s*Code:\s*(?P<ean>\d{12,14})", re.I)
-TOTAL_LINE_PAT = re.compile(
+TOTAL_PAT = re.compile(
     r"""^
-    (?P<qty>[\d\.]+)\s+PZ\s+
+    (?P<qty>[\d\.\s]+)\s+PZ\s+
     (?P<unit>[\d\.,]+)\s+
     (?P<gross>[\d\.,]+)
     (?:\s+(?P<disc>-?\d+%)\s+(?P<net>[\d\.,]+))?
@@ -350,7 +348,7 @@ TOTAL_LINE_PAT = re.compile(
     $""", re.X | re.I
 )
 
-BAD_HEAD_PREFIXES = (
+BAD_PREFIXES = (
     "Invoice", "Document Date", "Invoice No.", "Location Page", "DESTINATION",
     "Sell-to", "Ship-to", "Registered office", "Administrative headquarters",
     "Share Capital", "Company belonging", "CIF", "Shipment Method",
@@ -360,68 +358,69 @@ BAD_HEAD_PREFIXES = (
     "INVOICING"
 )
 
+def _to_int_qty(s: str) -> int:
+    # admite "1.000" o "1 000"
+    return int(s.replace(".", "").replace(" ", "").replace(",", "") or 0)
+
 def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict]:
     rows: List[dict] = []
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             text = page.extract_text() or ""
-            # normaliza pequeñas dobles-espacios
-            lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+            # normaliza NBSP y dobles espacios
+            lines = [ln.replace("\u202f", " ").strip() for ln in text.split("\n") if ln.strip()]
 
-            # recorre y cuando encuentre TOTALES, sube a buscar EAN/HS/HEAD
-            for i, ln in enumerate(lines):
-                mt = TOTAL_LINE_PAT.match(ln)
-                if not mt:
+            for idx, ln in enumerate(lines):
+                m_ean = EAN_PAT.search(ln)
+                if not m_ean:
                     continue
 
-                # 1) totales
-                qty  = int(mt.group("qty").replace(".","").replace(",",""))
-                unit = fnum(mt.group("unit"))
-                gross = fnum(mt.group("gross"))
-                total = fnum(mt.group("net")) if mt.group("net") else gross
+                ean = m_ean.group("ean")
+                ref = desc = hs = org = ""
+                qty = None; unit = None; total = None
 
-                # 2) ventana hacia arriba (5-8 líneas suelen bastar)
-                win_start = max(0, i-8)
-                window = lines[win_start:i]
+                # 1) Buscar HS/Origin y HEAD en las 4 líneas de arriba
+                up_start = max(0, idx - 4)
+                up_window = lines[up_start:idx]
 
-                ref = desc = ean = hs = org = ""
-
-                # Busca EAN y HS/Origin primero (pueden venir en cualquier orden)
-                for w in reversed(window):
-                    if not ean:
-                        me = EAN_PAT.search(w)
-                        if me: ean = me.group("ean")
-                    if not hs or not org:
-                        mh = HS_ORG_PAT.search(w)
-                        if mh:
-                            hs = mh.group("hs")
-                            org = mh.group("org")
-                    if ean and hs and org:
+                # HS/Origin suele estar 1-2 líneas arriba del EAN
+                for w in reversed(up_window):
+                    mh = HS_ORG_PAT.search(w)
+                    if mh:
+                        hs = mh.group("hs")
+                        org = mh.group("org")
                         break
 
-                # Busca cabecera válida inmediatamente por encima
-                for w in reversed(window):
-                    # evita líneas de metadatos
-                    if any(w.startswith(p) for p in BAD_HEAD_PREFIXES):
+                # HEAD normalmente es justo encima de HS (o 2-3 líneas arriba del EAN)
+                for w in reversed(up_window):
+                    if any(w.startswith(p) for p in BAD_PREFIXES):
                         continue
-                    mh = HEAD_CAND_PAT.match(w)
+                    mh = HEAD_PAT.match(w)
                     if mh:
-                        ref  = mh.group("ref")
+                        ref = mh.group("ref").strip()
+                        # si la misma línea trae “totales inline”, córtalos si hubiera (muy raro aquí)
                         desc = mh.group("desc").strip()
                         break
 
-                # Si no encontró cabecera, intenta heurística: toma el primer token de la línea previa
-                if not ref and window:
-                    tokens = window[-1].split()
-                    if tokens:
-                        tok = tokens[0]
-                        if re.fullmatch(r"(?:[A-Z]{3}\d{3,6}[A-Z]?|\d{4,6}[A-Z]?)", tok):
-                            ref = tok
-                            desc = window[-1][len(tok):].strip()
+                # 2) Buscar la línea de TOTALES en las 4 líneas de abajo
+                down_end = min(len(lines), idx + 5)
+                down_window = lines[idx+1:down_end]
+                mt = None
+                for w in down_window:
+                    mt = TOTAL_PAT.match(w)
+                    if mt:
+                        break
 
-                # Si aún no hay ref/desc, omite (ruido)
-                if not ref or not desc:
+                if mt:
+                    qty = _to_int_qty(mt.group("qty"))
+                    unit = fnum(mt.group("unit"))
+                    gross = fnum(mt.group("gross"))
+                    net_s = mt.group("net")
+                    total = fnum(net_s) if net_s is not None else gross
+
+                # Si no hay HEAD o no hay totales, descarta (ruido)
+                if not (ref and desc and qty is not None and unit is not None and total is not None):
                     continue
 
                 rows.append({
