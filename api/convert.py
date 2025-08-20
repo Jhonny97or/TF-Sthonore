@@ -424,83 +424,51 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                 })
     return rows
 # ─────────────────────  EXTRACTOR 5  (COTY)  ─────────────────────
-# Cabecera: "Ref. No. Customer ref. no. EAN Code Material ..."
 COTY_HEAD = re.compile(
-    r"^(?P<ref>\d{6,14})\s+(?P<ean>\d{12,14})\s+(?P<desc>.+)$"
+    r"^(?P<ref>\d{5,15})\s+(?P<ean>\d{8,14})\s+(?P<desc>.+)$"
 )
 
-# HS/Origen (inglés y español)
 COTY_HS = re.compile(r"\(H\s*S\s*No\.\s*(?P<hs>\d{6,12})\)", re.I)
 COTY_ORG_EN = re.compile(r"Country of origin:\s*(?P<org>[A-Za-z\s]+)", re.I)
 COTY_ORG_ES = re.compile(r"Pa[ií]s de origen:\s*(?P<org>[A-Za-z\s]+)", re.I)
 
-# Totales (Qty Unit Total) con posibles * / ** al final
 COTY_TOTAL = re.compile(
     r"""^\s*
-    (?P<qty>[\d\.\s]+)\s+                 # cantidad (1.000 o "1 000")
-    (?P<unit>[\d\.,]+)\s+                 # unit price
-    (?P<total>[\d\.,]+)                   # total
-    (?P<stars>\*{1,2})?                   # * (no-UE) o ** (gratis)
+    (?P<qty>[\d\.\s,]+)\s+         # cantidad
+    (?P<unit>[\d\.,]+)\s+          # unit price
+    (?P<total>[\d\.,]+)            # total
+    (?P<stars>\*{1,2})?            # *, ** opcionales
     \s*$""", re.X
 )
-
-ISO2 = {
-    "france":"FR","francia":"FR",
-    "spain":"ES","españa":"ES","espana":"ES",
-    "china":"CN",
-    "italy":"IT","italia":"IT",
-    "germany":"DE","alemania":"DE",
-    "united states":"US","usa":"US","estados unidos":"US",
-    "portugal":"PT","poland":"PL",
-    "fr":"FR","es":"ES","cn":"CN","it":"IT","de":"DE","us":"US"
-}
-
-def _euro_num(s: str) -> float:
-    if not s: 
-        return 0.0
-    t = s.replace("\u202f","").replace(" ","")
-    if t.count(",")==1:
-        t = t.replace(".","").replace(",",".")
-    else:
-        t = t.replace(",","")
-    try:
-        return float(t)
-    except:
-        return 0.0
-
-def _qty_int(s: str) -> int:
-    return int(s.replace("\u202f","").replace(" ","").replace(".","").replace(",","") or 0)
-
-def _to_iso2(country: str) -> str:
-    k = (country or "").strip().lower()
-    return ISO2.get(k, country[:2].upper() if country else "")
 
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
     rows = []
     current = None
 
-    def flush():
+    def flush(force=False):
         nonlocal current
         if not current:
             return
-        # normalizamos con todas las columnas de OUTPUT_COLS
-        row = {}
-        for col in OUTPUT_COLS:
-            if col == "Invoice Number":
-                row[col] = invoice_number
-            else:
-                row[col] = current.get(col, "")
-        rows.append(row)
+        # solo si tenemos referencia y descripción
+        if current.get("Reference"):
+            # aunque falten números, exporta igual
+            current.setdefault("Code EAN", "")
+            current.setdefault("Custom Code", "")
+            current.setdefault("Origin", "")
+            current.setdefault("Quantity", 0)
+            current.setdefault("Unit Price", 0.0)
+            current.setdefault("Total Price", 0.0)
+            current["Invoice Number"] = invoice_number
+            rows.append(current.copy())
         current = None
 
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
-            text = page.extract_text() or ""
-            # normaliza NBSP
-            lines = [ln.replace("\u202f"," ").strip() for ln in text.split("\n") if ln.strip()]
-            i = 0
-            while i < len(lines):
-                ln = lines[i]
+            lines = (page.extract_text() or "").split("\n")
+            for ln in lines:
+                ln = ln.replace("\u202f", " ").strip()
+                if not ln:
+                    continue
 
                 # 1) Cabecera
                 mh = COTY_HEAD.match(ln)
@@ -510,49 +478,38 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                     current = {
                         "Reference": gd["ref"],
                         "Code EAN": gd["ean"],
-                        "Description": gd["desc"].strip(),
-                        "Custom Code": "",
-                        "Origin": "",
-                        "Quantity": "",
-                        "Unit Price": "",
-                        "Total Price": ""
+                        "Description": gd["desc"].strip()
                     }
-                    i += 1
                     continue
 
                 if not current:
-                    i += 1
                     continue
 
-                # 2) HS dentro de paréntesis
+                # 2) HS Code
                 if (mhs := COTY_HS.search(ln)):
                     current["Custom Code"] = mhs.group("hs")
 
-                # 3) Country of origin / País de origen
+                # 3) Country
                 morg = COTY_ORG_EN.search(ln) or COTY_ORG_ES.search(ln)
                 if morg:
                     current["Origin"] = _to_iso2(morg.group("org"))
 
-                # 4) Línea de totales
+                # 4) Totales
                 mt = COTY_TOTAL.match(ln)
                 if mt:
                     qty = _qty_int(mt.group("qty"))
                     unit = _euro_num(mt.group("unit"))
                     total = _euro_num(mt.group("total"))
-                    stars = (mt.group("stars") or "")
-                    # En facturas ES: ** = Gratis → total 0
-                    if stars == "**":
+                    if (mt.group("stars") or "") == "**":
                         total = 0.0
                     current["Quantity"] = qty
                     current["Unit Price"] = unit
                     current["Total Price"] = total
                     flush()
-                i += 1
 
-    logging.info("Extractor5 (COTY) result rows=%d", len(rows))
+    # por si se quedó colgado el último
+    flush(force=True)
     return rows
-
-
 
 # ───────────  COMPLEMENTO: detectar Invoice No. dentro del PDF  ─────────────
 INVNO_PAT = re.compile(r"Invoice\s+No\.\s*([A-Z0-9\-\/]+)", re.I)
