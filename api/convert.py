@@ -423,17 +423,7 @@ def extract_interparfums_blocks(pdf_path: str, invoice_number: str) -> List[dict
                     "Invoice Number": invoice_number
                 })
     return rows
-# ─────────────────────  EXTRACTOR 5  (COTY)  ─────────────────────
-COTY_ROW = re.compile(
-    r"""^(?P<ref>\w+)\s+                # Ref. No.
-         (?P<cust>\w+)\s+               # Customer ref. no.
-         (?P<ean>\d{8,14})\s+           # EAN Code
-         (?P<desc>.+?)\s+               # Description / Article
-         (?P<qty>\d+(?:[\s.,]\d+)*)\s+  # Quantity (with , . or space)
-         (?P<price>[\d.,]+)$            # Price USD
-    """, re.X
-)
-
+# ─────────────────────  EXTRACTOR 5 (COTY, robusto) ─────────────────────
 def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
     rows = []
     with pdfplumber.open(pdf_path) as pdf:
@@ -441,21 +431,29 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
             lines = (page.extract_text() or "").split("\n")
             for ln in lines:
                 ln = ln.replace("\u202f", " ").strip()
-                if not ln:
-                    continue
+                if not ln or ln.lower().startswith("ref. no"):
+                    continue  # saltar cabecera
 
-                m = COTY_ROW.match(ln)
-                if m:
-                    gd = m.groupdict()
-                    qty = _qty_int(gd["qty"])
-                    price = _euro_num(gd["price"])
+                parts = ln.split()
+                if len(parts) < 6:
+                    continue  # no tiene suficientes columnas
+
+                try:
+                    ref = parts[0]
+                    cust = parts[1]
+                    ean = parts[2]
+
+                    qty = _qty_int(parts[-2])
+                    price = _euro_num(parts[-1])
                     total = round(qty * price, 2)
 
+                    desc = " ".join(parts[3:-2])
+
                     rows.append({
-                        "Reference": gd["ref"],
-                        "Customer Ref": gd["cust"],
-                        "Code EAN": gd["ean"],
-                        "Description": gd["desc"].strip(),
+                        "Reference": ref,
+                        "Customer Ref": cust,
+                        "Code EAN": ean,
+                        "Description": desc,
                         "Quantity": qty,
                         "Unit Price": price,
                         "Total Price": total,
@@ -463,6 +461,9 @@ def extract_coty(pdf_path: str, invoice_number: str) -> List[dict]:
                         "Origin": "",
                         "Invoice Number": invoice_number
                     })
+                except Exception:
+                    # si hay líneas que no cuadran, se ignoran
+                    continue
     return rows
 
 
