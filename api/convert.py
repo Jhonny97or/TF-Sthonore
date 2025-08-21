@@ -1,4 +1,4 @@
-# app.py  ── listo para Vercel o ejecución local
+# app.py  ── listo para Vercel o ejecución local JHONNY 
 import logging
 import os
 import re
