@@ -71,13 +71,16 @@ def parse_invoice_number_from_pdf(pdf_path: str) -> str:
 HTS_PAT = re.compile(r"^\d{6,10}$")
 UPC_PAT = re.compile(r"^\d{11,14}$")
 
-# ─────────────────────  EXTRACTOR 1  (facturas clásicas)  ───────────────────
+# ─────────────────────  EXTRACTOR 1  (facturas clásicas + Dior Proforma)  ───────────────────
 INV_PAT      = re.compile(r"(?:FACTURE|INVOICE)\D*(\d{6,})", re.I)
 PROF_PAT     = re.compile(r"PROFORMA[\s\S]*?(\d{6,})", re.I)
 ORDER_PAT_EN = re.compile(r"ORDER\s+NUMBER\D*(\d{6,})", re.I)
 ORDER_PAT_FR = re.compile(r"N°\s*DE\s*COMMANDE\D*(\d{6,})", re.I)
 PLV_PAT      = re.compile(r"FACTURE\s+SANS\s+PAIEMENT|INVOICE\s+WITHOUT\s+PAYMENT", re.I)
 ORG_PAT      = re.compile(r"PAYS D['’]?ORIGINE[^:]*:\s*(.+)", re.I)
+
+# NUEVO: patrón para capturar el Your Order Nr en las proformas Dior
+ORDER_NR_PAT = re.compile(r"V/CDE[-\s]?Y/ORD\s*Nr\s*:\s*(.+)", re.I)
 
 ROW_FACT = re.compile(
     r"^([A-Z]\w{3,11})\s+(\d{12,14})\s+(\d{6,9})\s+(\d[\d.,]*)\s+([\d.,]+)\s+([\d.,]+)\s*$"
@@ -104,6 +107,8 @@ def extract_original(pdf_path: str) -> List[dict]:
 
         inv_global = ""
         plv_global = False
+        your_order_nr = ""   # <── nuevo campo
+
         if kind == "factura":
             if m := INV_PAT.search(all_txt):
                 inv_global = m.group(1)
@@ -116,6 +121,10 @@ def extract_original(pdf_path: str) -> List[dict]:
                 inv_global = m.group(1)
             elif m := ORDER_PAT_FR.search(all_txt):
                 inv_global = m.group(1)
+
+        # Buscar el Your Order Nr en todo el texto
+        if mo := ORDER_NR_PAT.search(all_txt):
+            your_order_nr = mo.group(1).strip()
 
         invoice_full = inv_global + ("PLV" if plv_global else "")
         org_global = ""
@@ -144,6 +153,7 @@ def extract_original(pdf_path: str) -> List[dict]:
                         "Unit Price": fnum(unit_s),
                         "Total Price": fnum(tot_s),
                         "Invoice Number": invoice_full,
+                        "Your Order Nr": your_order_nr,   # <── agregado
                     })
                 elif kind == "proforma" and (mpd := ROW_PROF_DIOR.match(ln)):
                     ref, ean, custom, qty_s, unit_s, tot_s = mpd.groups()
@@ -158,6 +168,7 @@ def extract_original(pdf_path: str) -> List[dict]:
                         "Unit Price": fnum(unit_s),
                         "Total Price": fnum(tot_s),
                         "Invoice Number": invoice_full,
+                        "Your Order Nr": your_order_nr,
                     })
                 elif kind == "proforma" and (mp := ROW_PROF.match(ln)):
                     ref, ean, unit_s, qty_s = mp.groups()
@@ -174,6 +185,7 @@ def extract_original(pdf_path: str) -> List[dict]:
                         "Unit Price": unit,
                         "Total Price": unit * qty,
                         "Invoice Number": invoice_full,
+                        "Your Order Nr": your_order_nr,
                     })
 
     # completar Origin si hay uno solo por invoice
@@ -186,23 +198,29 @@ def extract_original(pdf_path: str) -> List[dict]:
             r["Origin"] = next(iter(inv2org[r["Invoice Number"]]))
     return rows
 
-# ─────────────────────  EXTRACTOR 2  (por coordenadas)  ──────────────────────
+
+# ─────────────────────  EXTRACTOR 2  (por coordenadas: LVMH)  ──────────────────────
 COL_BOUNDS = {
     "ref":   (0,   70),
-    "desc":  (70, 340),
-    "upc":   (340,430),
-    "ctry":  (430,465),
-    "hs":    (465,535),
-    "qty":   (535,585),
-    "unit":  (585,635),
-    "total": (635,725),
+    "desc":  (70, 500),   # <── ampliado para capturar toda la descripción real
+    "upc":   (500,580),
+    "ctry":  (580,630),
+    "hs":    (630,690),
+    "qty":   (690,740),
+    "unit":  (740,800),
+    "total": (800,880),
 }
+
 REF_PAT = re.compile(r"^\d{5,6}[A-Z]?$")
 NUM_PAT = re.compile(r"[0-9]")
 SKIP_SNIPPETS = {
     "No. Description","Total before","Bill To Ship","CIF CHILE",
     "Invoice","Ship From","Ship To","VAT/Tax","Shipping Te"
 }
+
+# NUEVOS patrones
+ORDER_NR_PAT2 = re.compile(r"(?:YOUR\s+ORDER\s+Nr|V/CDE)\s*:\s*(.+)", re.I)
+ORIGIN_PAT2   = re.compile(r"Country\s+of\s+Origin\s*:\s*(.+)", re.I)
 
 def clean(txt: str) -> str:
     return txt.replace("\u202f"," ").strip()
@@ -245,7 +263,17 @@ def rows_from_page(page) -> List[Dict[str,str]]:
 
 def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
     rows=[]
+    your_order_nr=""
+    country_origin=""
+
     with pdfplumber.open(pdf_path) as pdf:
+        # buscar encabezados en todo el texto
+        full_txt="\n".join(page.extract_text() or "" for page in pdf.pages)
+        if mo := ORDER_NR_PAT2.search(full_txt):
+            your_order_nr=mo.group(1).strip()
+        if mo := ORIGIN_PAT2.search(full_txt):
+            country_origin=mo.group(1).strip()
+
         for page in pdf.pages:
             for r in rows_from_page(page):
                 rows.append({
@@ -253,13 +281,15 @@ def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
                     "Code EAN": r["upc"],
                     "Custom Code": r["hs"],
                     "Description": r["desc"],
-                    "Origin": r["ctry"],
+                    "Origin": country_origin or r["ctry"],   # si hay global, usarlo
                     "Quantity": to_int2(r["qty"]),
                     "Unit Price": to_float2(r["unit"]),
                     "Total Price": to_float2(r["total"]),
-                    "Invoice Number": inv_number
+                    "Invoice Number": inv_number,
+                    "Your Order Nr": your_order_nr   # <── agregado
                 })
     return rows
+
 
 # ─────────────────────  EXTRACTOR 3  (proveedor nuevo)  ──────────────────────
 pattern_full = re.compile(r"""
