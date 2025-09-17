@@ -265,6 +265,65 @@ def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
                 })
     return rows
 
+#---- EXTRACTOR 2 ------# 
+
+def rows_from_page(page) -> List[Dict[str,str]]:
+    rows=[]
+    grouped={}
+    for ch in page.chars:
+        grouped.setdefault(round(ch["top"],1),[]).append(ch)
+
+    for _,chs in sorted(grouped.items()):
+        line_txt="".join(c["text"] for c in sorted(chs,key=lambda c:c["x0"]))
+        if not line_txt.strip() or any(sn in line_txt for sn in SKIP_SNIPPETS):
+            continue
+
+        cols={k:"" for k in COL_BOUNDS}
+        for c in sorted(chs,key=lambda c:c["x0"]):
+            xm=(c["x0"]+c["x1"])/2
+            for key,(x0,x1) in COL_BOUNDS.items():
+                if x0<=xm<x1:
+                    cols[key]+=c["text"]
+                    break
+        cols={k:clean(v) for k,v in cols.items()}
+
+        # Si es una fila normal con referencia y cantidad
+        if cols["ref"] and REF_PAT.match(cols["ref"]) and NUM_PAT.search(cols["qty"]):
+            rows.append(cols)
+
+        # Si es una línea sin ref → probablemente descripción extra
+        elif not cols["ref"] and rows:
+            rows[-1]["desc"] += " " + line_txt.strip()
+
+    return rows
+
+
+def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
+    rows=[]
+    your_order_nr=""
+
+    with pdfplumber.open(pdf_path) as pdf:
+        # Extraer “Your Order Nr”
+        full_txt="\n".join(page.extract_text() or "" for page in pdf.pages)
+        m = re.search(r"(?:YOUR\s+ORDER\s+Nr|V/CDE)\s*:\s*(.+)", full_txt, re.I)
+        if m:
+            your_order_nr = m.group(1).strip()
+
+        for page in pdf.pages:
+            for r in rows_from_page(page):
+                rows.append({
+                    "Reference": r["ref"],
+                    "Code EAN": r["upc"],
+                    "Custom Code": r["hs"],
+                    "Description": r["desc"],
+                    "Origin": r["ctry"],   # se deja como estaba antes
+                    "Quantity": to_int2(r["qty"]),
+                    "Unit Price": to_float2(r["unit"]),
+                    "Total Price": to_float2(r["total"]),
+                    "Invoice Number": inv_number,
+                    "Your Order Nr": your_order_nr  # ✅ agregado fijo
+                })
+    return rows
 
 
 # ─────────────────────  EXTRACTOR 3  (proveedor nuevo)  ──────────────────────
