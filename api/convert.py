@@ -199,7 +199,7 @@ def extract_original(pdf_path: str) -> List[dict]:
     return rows
 
 
-# ─────────────────────  EXTRACTOR 2  (por coordenadas)  ──────────────────────
+# ─────────────────────  EXTRACTOR 2  (por coordenadas: LVMH)  ──────────────────────
 COL_BOUNDS = {
     "ref":   (0,   70),
     "desc":  (70, 340),
@@ -216,6 +216,8 @@ SKIP_SNIPPETS = {
     "No. Description","Total before","Bill To Ship","CIF CHILE",
     "Invoice","Ship From","Ship To","VAT/Tax","Shipping Te"
 }
+
+ORDER_NR_PAT2 = re.compile(r"(?:YOUR\s+ORDER\s+Nr|V/CDE)\s*[:\-]?\s*(.+)", re.I)
 
 def clean(txt: str) -> str:
     return txt.replace("\u202f"," ").strip()
@@ -236,10 +238,12 @@ def rows_from_page(page) -> List[Dict[str,str]]:
     grouped={}
     for ch in page.chars:
         grouped.setdefault(round(ch["top"],1),[]).append(ch)
+
     for _,chs in sorted(grouped.items()):
         line_txt="".join(c["text"] for c in sorted(chs,key=lambda c:c["x0"]))
         if not line_txt.strip() or any(sn in line_txt for sn in SKIP_SNIPPETS):
             continue
+
         cols={k:"" for k in COL_BOUNDS}
         for c in sorted(chs,key=lambda c:c["x0"]):
             xm=(c["x0"]+c["x1"])/2
@@ -248,29 +252,39 @@ def rows_from_page(page) -> List[Dict[str,str]]:
                     cols[key]+=c["text"]
                     break
         cols={k:clean(v) for k,v in cols.items()}
-        if not cols["ref"]:
-            if rows: rows[-1]["desc"]+=" "+cols["desc"]
-            continue
-        if not REF_PAT.match(cols["ref"]) or not NUM_PAT.search(cols["qty"]):
-            continue
-        rows.append(cols)
+
+        # Caso 1: fila normal con referencia y cantidad
+        if cols["ref"] and REF_PAT.match(cols["ref"]) and NUM_PAT.search(cols["qty"]):
+            rows.append(cols)
+
+        # Caso 2: línea sin referencia → se trata como descripción extendida
+        elif not cols["ref"] and rows:
+            rows[-1]["desc"] = (rows[-1]["desc"] + " " + line_txt.strip()).strip()
+
     return rows
 
 def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
     rows=[]
+    your_order_nr=""
+
     with pdfplumber.open(pdf_path) as pdf:
+        full_txt="\n".join(page.extract_text() or "" for page in pdf.pages)
+        if mo := ORDER_NR_PAT2.search(full_txt):
+            your_order_nr = mo.group(1).strip()
+
         for page in pdf.pages:
             for r in rows_from_page(page):
                 rows.append({
-                    "Reference": r["ref"],
-                    "Code EAN": r["upc"],
-                    "Custom Code": r["hs"],
-                    "Description": r["desc"],
-                    "Origin": r["ctry"],
-                    "Quantity": to_int2(r["qty"]),
-                    "Unit Price": to_float2(r["unit"]),
-                    "Total Price": to_float2(r["total"]),
-                    "Invoice Number": inv_number
+                    "Reference": r.get("ref",""),
+                    "Code EAN": r.get("upc",""),
+                    "Custom Code": r.get("hs",""),
+                    "Description": r.get("desc",""),
+                    "Origin": r.get("ctry",""),
+                    "Quantity": to_int2(r.get("qty","0")),
+                    "Unit Price": to_float2(r.get("unit","0")),
+                    "Total Price": to_float2(r.get("total","0")),
+                    "Invoice Number": inv_number,
+                    "Your Order Nr": your_order_nr  # <── agregado fijo
                 })
     return rows
 
