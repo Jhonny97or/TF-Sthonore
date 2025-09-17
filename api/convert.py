@@ -220,13 +220,13 @@ def rows_from_page(page) -> List[Dict[str,str]]:
                     break
         cols={k:clean(v) for k,v in cols.items()}
 
-        # Si es una fila normal con referencia y cantidad
+        # Caso 1: fila normal de producto
         if cols["ref"] and REF_PAT.match(cols["ref"]) and NUM_PAT.search(cols["qty"]):
             rows.append(cols)
 
-        # Si es una línea sin ref → probablemente descripción extra
+        # Caso 2: línea sin ref (usualmente descripción extendida)
         elif not cols["ref"] and rows:
-            rows[-1]["desc"] += " " + line_txt.strip()
+            rows[-1]["desc"] = (rows[-1]["desc"] + " " + line_txt.strip()).strip()
 
     return rows
 
@@ -236,27 +236,35 @@ def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
     your_order_nr=""
 
     with pdfplumber.open(pdf_path) as pdf:
-        # Extraer “Your Order Nr”
+        # Texto completo del PDF
         full_txt="\n".join(page.extract_text() or "" for page in pdf.pages)
-        m = re.search(r"(?:YOUR\s+ORDER\s+Nr|V/CDE)\s*:\s*(.+)", full_txt, re.I)
+
+        # Buscar "Your Order Nr"
+        m = re.search(r"(?:YOUR\s+ORDER\s+Nr|V/CDE)\s*:\s*([A-Z0-9\- ]+)", full_txt, re.I)
         if m:
             your_order_nr = m.group(1).strip()
 
+        # Procesar filas
         for page in pdf.pages:
             for r in rows_from_page(page):
-                rows.append({
-                    "Reference": r["ref"],
-                    "Code EAN": r["upc"],
-                    "Custom Code": r["hs"],
-                    "Description": r["desc"],
-                    "Origin": r["ctry"],   # se deja como estaba antes
-                    "Quantity": to_int2(r["qty"]),
-                    "Unit Price": to_float2(r["unit"]),
-                    "Total Price": to_float2(r["total"]),
-                    "Invoice Number": inv_number,
-                    "Your Order Nr": your_order_nr  # ✅ agregado fijo
-                })
+                try:
+                    rows.append({
+                        "Reference": r.get("ref",""),
+                        "Code EAN": r.get("upc",""),
+                        "Custom Code": r.get("hs",""),
+                        "Description": r.get("desc",""),
+                        "Origin": r.get("ctry",""),
+                        "Quantity": to_int2(r.get("qty","0")),
+                        "Unit Price": to_float2(r.get("unit","0")),
+                        "Total Price": to_float2(r.get("total","0")),
+                        "Invoice Number": inv_number,
+                        "Your Order Nr": your_order_nr
+                    })
+                except Exception as e:
+                    print(f"⚠️ Error procesando fila: {e} -> {r}")
+
     return rows
+
 
 
 
