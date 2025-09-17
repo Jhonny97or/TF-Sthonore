@@ -199,18 +199,47 @@ def extract_original(pdf_path: str) -> List[dict]:
     return rows
 
 
-# ─────────────────────  EXTRACTOR 2  (por coordenadas: LVMH)  ──────────────────────
+# ─────────────────────  EXTRACTOR 2  (por coordenadas)  ──────────────────────
+COL_BOUNDS = {
+    "ref":   (0,   70),
+    "desc":  (70, 340),
+    "upc":   (340,430),
+    "ctry":  (430,465),
+    "hs":    (465,535),
+    "qty":   (535,585),
+    "unit":  (585,635),
+    "total": (635,725),
+}
+REF_PAT = re.compile(r"^\d{5,6}[A-Z]?$")
+NUM_PAT = re.compile(r"[0-9]")
+SKIP_SNIPPETS = {
+    "No. Description","Total before","Bill To Ship","CIF CHILE",
+    "Invoice","Ship From","Ship To","VAT/Tax","Shipping Te"
+}
+
+def clean(txt: str) -> str:
+    return txt.replace("\u202f"," ").strip()
+
+def to_float2(txt: str) -> float:
+    t = txt.replace("\u202f","").replace(" ","")
+    if t.count(",")==1 and t.count(".")==0:
+        t = t.replace(",",".")
+    elif t.count(".")>1:
+        t = t.replace(".","")
+    return float(t or 0)
+
+def to_int2(txt: str) -> int:
+    return int(txt.replace(",","").replace(".","") or 0)
+
 def rows_from_page(page) -> List[Dict[str,str]]:
     rows=[]
     grouped={}
     for ch in page.chars:
         grouped.setdefault(round(ch["top"],1),[]).append(ch)
-
     for _,chs in sorted(grouped.items()):
         line_txt="".join(c["text"] for c in sorted(chs,key=lambda c:c["x0"]))
         if not line_txt.strip() or any(sn in line_txt for sn in SKIP_SNIPPETS):
             continue
-
         cols={k:"" for k in COL_BOUNDS}
         for c in sorted(chs,key=lambda c:c["x0"]):
             xm=(c["x0"]+c["x1"])/2
@@ -219,52 +248,31 @@ def rows_from_page(page) -> List[Dict[str,str]]:
                     cols[key]+=c["text"]
                     break
         cols={k:clean(v) for k,v in cols.items()}
-
-        # Caso 1: fila normal de producto
-        if cols["ref"] and REF_PAT.match(cols["ref"]) and NUM_PAT.search(cols["qty"]):
-            rows.append(cols)
-
-        # Caso 2: línea sin ref (usualmente descripción extendida)
-        elif not cols["ref"] and rows:
-            rows[-1]["desc"] = (rows[-1]["desc"] + " " + line_txt.strip()).strip()
-
+        if not cols["ref"]:
+            if rows: rows[-1]["desc"]+=" "+cols["desc"]
+            continue
+        if not REF_PAT.match(cols["ref"]) or not NUM_PAT.search(cols["qty"]):
+            continue
+        rows.append(cols)
     return rows
-
 
 def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
     rows=[]
-    your_order_nr=""
-
     with pdfplumber.open(pdf_path) as pdf:
-        # Texto completo del PDF
-        full_txt="\n".join(page.extract_text() or "" for page in pdf.pages)
-
-        # Buscar "Your Order Nr"
-        m = re.search(r"(?:YOUR\s+ORDER\s+Nr|V/CDE)\s*:\s*([A-Z0-9\- ]+)", full_txt, re.I)
-        if m:
-            your_order_nr = m.group(1).strip()
-
-        # Procesar filas
         for page in pdf.pages:
             for r in rows_from_page(page):
-                try:
-                    rows.append({
-                        "Reference": r.get("ref",""),
-                        "Code EAN": r.get("upc",""),
-                        "Custom Code": r.get("hs",""),
-                        "Description": r.get("desc",""),
-                        "Origin": r.get("ctry",""),
-                        "Quantity": to_int2(r.get("qty","0")),
-                        "Unit Price": to_float2(r.get("unit","0")),
-                        "Total Price": to_float2(r.get("total","0")),
-                        "Invoice Number": inv_number,
-                        "Your Order Nr": your_order_nr
-                    })
-                except Exception as e:
-                    print(f"⚠️ Error procesando fila: {e} -> {r}")
-
+                rows.append({
+                    "Reference": r["ref"],
+                    "Code EAN": r["upc"],
+                    "Custom Code": r["hs"],
+                    "Description": r["desc"],
+                    "Origin": r["ctry"],
+                    "Quantity": to_int2(r["qty"]),
+                    "Unit Price": to_float2(r["unit"]),
+                    "Total Price": to_float2(r["total"]),
+                    "Invoice Number": inv_number
+                })
     return rows
-
 
 
 
