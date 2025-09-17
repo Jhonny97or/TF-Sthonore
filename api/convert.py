@@ -199,52 +199,19 @@ def extract_original(pdf_path: str) -> List[dict]:
     return rows
 
 
-# ─────────────────────  EXTRACTOR 2  (por coordenadas: LVMH)  ──────────────────────
-COL_BOUNDS = {
-    "ref":   (0,   70),
-    "desc":  (70, 500),   # <── ampliado para capturar toda la descripción real
-    "upc":   (500,580),
-    "ctry":  (580,630),
-    "hs":    (630,690),
-    "qty":   (690,740),
-    "unit":  (740,800),
-    "total": (800,880),
-}
-
-REF_PAT = re.compile(r"^\d{5,6}[A-Z]?$")
-NUM_PAT = re.compile(r"[0-9]")
-SKIP_SNIPPETS = {
-    "No. Description","Total before","Bill To Ship","CIF CHILE",
-    "Invoice","Ship From","Ship To","VAT/Tax","Shipping Te"
-}
-
-# NUEVOS patrones
-ORDER_NR_PAT2 = re.compile(r"(?:YOUR\s+ORDER\s+Nr|V/CDE)\s*:\s*(.+)", re.I)
-ORIGIN_PAT2   = re.compile(r"Country\s+of\s+Origin\s*:\s*(.+)", re.I)
-
-def clean(txt: str) -> str:
-    return txt.replace("\u202f"," ").strip()
-
-def to_float2(txt: str) -> float:
-    t = txt.replace("\u202f","").replace(" ","")
-    if t.count(",")==1 and t.count(".")==0:
-        t = t.replace(",",".")
-    elif t.count(".")>1:
-        t = t.replace(".","")
-    return float(t or 0)
-
-def to_int2(txt: str) -> int:
-    return int(txt.replace(",","").replace(".","") or 0)
-
 def rows_from_page(page) -> List[Dict[str,str]]:
     rows=[]
     grouped={}
     for ch in page.chars:
         grouped.setdefault(round(ch["top"],1),[]).append(ch)
+
+    pending_desc = None  # para guardar descripciones en la siguiente línea
+
     for _,chs in sorted(grouped.items()):
         line_txt="".join(c["text"] for c in sorted(chs,key=lambda c:c["x0"]))
         if not line_txt.strip() or any(sn in line_txt for sn in SKIP_SNIPPETS):
             continue
+
         cols={k:"" for k in COL_BOUNDS}
         for c in sorted(chs,key=lambda c:c["x0"]):
             xm=(c["x0"]+c["x1"])/2
@@ -253,26 +220,34 @@ def rows_from_page(page) -> List[Dict[str,str]]:
                     cols[key]+=c["text"]
                     break
         cols={k:clean(v) for k,v in cols.items()}
-        if not cols["ref"]:
-            if rows: rows[-1]["desc"]+=" "+cols["desc"]
-            continue
-        if not REF_PAT.match(cols["ref"]) or not NUM_PAT.search(cols["qty"]):
-            continue
-        rows.append(cols)
+
+        # Si la fila tiene referencia y cantidad → es una fila de producto
+        if cols["ref"] and REF_PAT.match(cols["ref"]) and NUM_PAT.search(cols["qty"]):
+            # Si la descripción es MANQU./NOTAVAIL. → se completará con la próxima línea
+            if cols["desc"].upper().startswith("MANQU"):
+                pending_desc = cols
+            else:
+                rows.append(cols)
+
+        # Si la fila NO tiene ref pero sí texto → probablemente sea la descripción real
+        elif not cols["ref"] and line_txt.strip():
+            if pending_desc:
+                pending_desc["desc"] = line_txt.strip()
+                rows.append(pending_desc)
+                pending_desc = None
+
     return rows
+
 
 def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
     rows=[]
     your_order_nr=""
-    country_origin=""
 
     with pdfplumber.open(pdf_path) as pdf:
-        # buscar encabezados en todo el texto
+        # Extraer “Your Order Nr”
         full_txt="\n".join(page.extract_text() or "" for page in pdf.pages)
         if mo := ORDER_NR_PAT2.search(full_txt):
             your_order_nr=mo.group(1).strip()
-        if mo := ORIGIN_PAT2.search(full_txt):
-            country_origin=mo.group(1).strip()
 
         for page in pdf.pages:
             for r in rows_from_page(page):
@@ -281,14 +256,15 @@ def extract_slice(pdf_path: str, inv_number: str) -> List[dict]:
                     "Code EAN": r["upc"],
                     "Custom Code": r["hs"],
                     "Description": r["desc"],
-                    "Origin": country_origin or r["ctry"],   # si hay global, usarlo
+                    "Origin": r["ctry"],
                     "Quantity": to_int2(r["qty"]),
                     "Unit Price": to_float2(r["unit"]),
                     "Total Price": to_float2(r["total"]),
                     "Invoice Number": inv_number,
-                    "Your Order Nr": your_order_nr   # <── agregado
+                    "Your Order Nr": your_order_nr  # ✅ ahora sí siempre
                 })
     return rows
+
 
 
 # ─────────────────────  EXTRACTOR 3  (proveedor nuevo)  ──────────────────────
